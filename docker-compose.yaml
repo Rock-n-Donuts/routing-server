@@ -1,0 +1,30 @@
+services:
+  client:
+    build:
+      context: ../routing-client
+    volumes:
+      - ../routing-client:/app
+    ports:
+      - 3000:3000
+  routing:
+    build:
+      context: .
+    volumes:
+      - .:/app
+    ports:
+      - 3001:3000
+    environment:
+      - DB_URL=mongodb://osm:osm@mongo
+  mongo:
+    image: mongo
+    restart: always
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      - 27017:27017
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: osm
+      MONGO_INITDB_ROOT_PASSWORD: osm
+
+volumes:
+  mongo-data:

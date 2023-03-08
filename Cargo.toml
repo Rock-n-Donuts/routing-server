@@ -1,0 +1,15 @@
+[package]
+name = "routing-server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix-cors = "0.6.4"
+actix-web = "4.3.1"
+json = "0.12.4"
+mongodb = "2.4.0"
+osmpbfreader = "0.16.0"
+pathfinding = "4.2.1"
+serde = "1.0.152"
