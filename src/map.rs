@@ -11,9 +11,9 @@ pub struct Map {
 
 impl Map {
     pub fn load(file_name: &str, mongo_client: Client) -> Map {
-            let mut nodes = HashMap::new();
-            let mut node_ways = HashMap::new();
-            let mut ways = HashMap::new();
+        let mut nodes = HashMap::new();
+        let mut node_ways = HashMap::new();
+        let mut ways = HashMap::new();
         let f = File::open(file_name).unwrap();
         let mut reader = OsmPbfReader::new(f);
         reader.par_iter().for_each(|o| match o.unwrap() {
@@ -32,20 +32,21 @@ impl Map {
             }
             OsmObj::Relation(_relation) => {}
         });
-        Map { nodes, node_ways, ways }
+        Map {
+            nodes,
+            node_ways,
+            ways,
+        }
     }
 
     pub fn successors(&self, node: &Node) -> Vec<(&Node, i32)> {
-        let ways = self.node_ways.get(&node.id.0).unwrap();
         let mut nodes = Vec::new();
+        let ways = self.node_ways.get(&node.id.0).unwrap();
         for way in ways {
             let node_index = way.nodes.iter().position(|n| n.0 == node.id.0).unwrap();
             for (i, node_id) in way.nodes.iter().enumerate() {
                 // we keep just the nodes that are next to the current node
                 if (i as i32 - node_index as i32).abs() != 1 {
-                    continue;
-                }
-                if !way.tags.contains_key("highway") {
                     continue;
                 }
                 // do not go in one way in the opposite direction
@@ -55,41 +56,37 @@ impl Map {
                 {
                     continue;
                 }
-                // We really hate motorways
-                if way.tags.contains("highway", "motorway") {
-                    continue;
-                }
-                if way.tags.contains("bicycle", "no") {
-                    continue;
-                }
-                if way.tags.contains("highway", "steps") {
+
+                if way.tags.contains("highway", "motorway")
+                    || way.tags.contains("bicycle", "no")
+                    || way.tags.contains("highway", "steps")
+                    || (!way.tags.contains_key("highway") && !way.tags.contains_key("bicycle"))
+                {
                     continue;
                 }
                 let new_node = self.nodes.get(&node_id.0).unwrap();
                 // the score starts as the distance between the two nodes
-                let mut move_cost = self.distance(node, new_node);
+                let mut move_cost = self.distance(node, new_node) as f32;
 
                 // We prefer cycleways
                 if way.tags.contains("highway", "cycleway") {
-                    move_cost /= 3;
+                    move_cost /= 2.0;
                 } else if way.tags.contains("bicyle", "designated")
                     || way.tags.contains("bicyle", "yes")
                 {
-                    move_cost /= 2;
+                    move_cost /= 2.0;
                 } else if way.tags.contains("bicyle", "dismount") {
-                    move_cost *= 5;
+                    move_cost *= 5.0;
                 } else if way.tags.contains("highway", "footway") {
-                    move_cost *= 3;
+                    move_cost *= 3.0;
                 } else if way.tags.contains("highway", "secondary") {
-                    move_cost *= 3;
+                    move_cost *= 3.0;
                 }
-                if way.tags.contains("canvec:ROADCLASS", "Collector") {
-                    move_cost *= 4;
-                }
+
                 if way.tags.contains("route", "ferry") {
-                    move_cost *= 5;
+                    move_cost *= 5.0;
                 }
-                nodes.push((new_node, move_cost));
+                nodes.push((new_node, move_cost as i32));
             }
         }
         // we return a vector of tuples with (node, move_cost)
