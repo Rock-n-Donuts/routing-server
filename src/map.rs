@@ -70,11 +70,15 @@ impl Map {
 
                 // We prefer cycleways
                 if way.tags.contains("highway", "cycleway") {
-                    move_cost /= 2.0;
+                    move_cost /= 3.0;
                 } else if way.tags.contains("bicyle", "designated")
                     || way.tags.contains("bicyle", "yes")
                 {
                     move_cost /= 2.0;
+                } else if way.tags.contains("highway", "primary") {
+                    move_cost *= 6.0;
+                } else if way.tags.contains("access", "customers") {
+                    move_cost *= 5.0;
                 } else if way.tags.contains("bicyle", "dismount") {
                     move_cost *= 5.0;
                 } else if way.tags.contains("highway", "footway") {

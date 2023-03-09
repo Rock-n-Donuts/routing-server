@@ -13,13 +13,19 @@ struct LatLon {
     lng: f64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RouteRequest {
+    start: LatLon,
+    end: LatLon,
+}
+
 #[post("/route")]
-async fn route(data: Data<AppState>, coords: web::Json<LatLon>) -> impl Responder {
+async fn route(data: Data<AppState>, coords: web::Json<RouteRequest>) -> impl Responder {
     println!("Route request: {:?}", coords);
     let map = data.map.clone();
-    let end = map.find_closest_node(coords.lat, coords.lng);
+    let end = map.find_closest_node(coords.end.lat, coords.end.lng);
+    let start = map.find_closest_node(coords.start.lat, coords.start.lng);
     println!("End node: {:?}, {:?}", end, map.node_ways.get(&end.id.0));
-    let start = map.nodes.get(&2187138709).unwrap();
 
     let (path, _score) = astar(
         &start,
