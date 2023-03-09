@@ -21,7 +21,7 @@ async fn route(data: Data<AppState>, coords: web::Json<LatLon>) -> impl Responde
     println!("End node: {:?}, {:?}", end, map.node_ways.get(&end.id.0));
     let start = map.nodes.get(&2187138709).unwrap();
 
-    let path = astar(
+    let (path, _score) = astar(
         &start,
         |&node| map.successors(node),
         |node| map.distance(node, end),
@@ -29,9 +29,11 @@ async fn route(data: Data<AppState>, coords: web::Json<LatLon>) -> impl Responde
     )
     .unwrap();
     let coords: Vec<LatLon> = path
-        .0
         .iter()
-        .map(|node| LatLon{lat: node.lat(), lng: node.lon()})
+        .map(|node| LatLon {
+            lat: node.lat(),
+            lng: node.lon(),
+        })
         .collect();
 
     HttpResponse::Ok().json(coords)
