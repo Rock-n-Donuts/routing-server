@@ -73,6 +73,8 @@ impl Map {
                     move_cost /= 3.0;
                 } else if way.tags.contains("bicyle", "designated")
                     || way.tags.contains("bicyle", "yes")
+                    || way.tags.contains("cycleway", "lane")
+                    || way.tags.contains("cycleway", "shared_lane")
                 {
                     move_cost /= 2.0;
                 } else if way.tags.contains("highway", "primary") {
@@ -82,7 +84,11 @@ impl Map {
                 } else if way.tags.contains("bicyle", "dismount") {
                     move_cost *= 5.0;
                 } else if way.tags.contains("highway", "footway") {
-                    move_cost *= 3.0;
+                    move_cost *= 2.0;
+                } else if way.tags.contains("highway", "tertiary") {
+                    move_cost *= 2.0;
+                } else if way.tags.contains("highway", "path") {
+                    move_cost *= 4.0;
                 } else if way.tags.contains("highway", "secondary") {
                     move_cost *= 3.0;
                 }
