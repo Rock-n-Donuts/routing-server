@@ -75,6 +75,8 @@ impl Map {
                     || way.tags.contains("bicyle", "yes")
                     || way.tags.contains("cycleway", "lane")
                     || way.tags.contains("cycleway", "shared_lane")
+                    || way.tags.contains("cycleway:left", "lane")
+                    || way.tags.contains("cycleway:right", "lane")
                 {
                     move_cost /= 2.0;
                 } else if way.tags.contains("highway", "primary") {
