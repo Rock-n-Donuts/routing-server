@@ -15,16 +15,21 @@ services:
       - 3001:3000
     environment:
       - DB_URL=mongodb://osm:osm@mongo
-  mongo:
-    image: mongo
-    restart: always
+  osm2pgsql:
+    build: 
+      context: ./osm2pgsql
     volumes:
-      - mongo-data:/data/db
+      - ./osm2pgsql:/app
+  db:
+    image: postgis/postgis
+    volumes:
+      - pg-data:/var/lib/postgresql/data
     ports:
-      - 27017:27017
+      - 5432:5432
     environment:
-      MONGO_INITDB_ROOT_USERNAME: osm
-      MONGO_INITDB_ROOT_PASSWORD: osm
+      POSTGRES_PASSWORD: osm
+      POSTGRES_USER: osm
+      POSTGRES_DB: osm
 
 volumes:
-  mongo-data:
+  pg-data:
