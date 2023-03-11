@@ -1,4 +1,6 @@
-use crate::AppState;
+use std::{error::Error, sync::mpsc};
+
+use crate::{data::node::Node, AppState};
 use actix_web::{
     post,
     web::{self, Data},
@@ -20,20 +22,42 @@ struct RouteRequest {
 }
 
 #[post("/route")]
-async fn route(data: Data<AppState>, coords: web::Json<RouteRequest>) -> impl Responder {
+async fn route(
+    data: Data<AppState>,
+    coords: web::Json<RouteRequest>,
+) -> Result<impl Responder, Box<dyn Error>> {
     println!("Route request: {:?}", coords);
-    let map = data.map.clone();
-    let end = map.find_closest_node(coords.end.lat, coords.end.lng);
-    let start = map.find_closest_node(coords.start.lat, coords.start.lng);
-    println!("End node: {:?}, {:?}", end, map.node_ways.get(&end.id.0));
+    let mut trx = data.db_pool.acquire().await?;
+    let end = Node::closest(&mut *trx, coords.end.lat, coords.end.lng).await?;
+    let start = Node::closest(&mut *trx, coords.start.lat, coords.start.lng).await?;
+
+    println!("Start: {:?}", start);
+    println!("End: {:?}", end);
 
     let (path, _score) = astar(
         &start,
-        |&node| map.successors(node),
-        |node| map.distance(node, end),
-        |node| node.decimicro_lat == end.decimicro_lat && node.decimicro_lon == end.decimicro_lon,
+        |node| -> Vec<(Node, i64)> {
+            let node = node.clone();
+            let data = data.clone();
+            let (tx, rx) = mpsc::channel();
+            let rt = data.rt.clone();
+            let node_cache = data.node_cache.clone();
+            let way_cache = data.way_cache.clone();
+            rt.spawn(async move {
+                let mut trx = data.db_pool.acquire().await.unwrap();
+                let nodes = node.successors(&mut *trx, node_cache, way_cache).await.unwrap();
+                tx.send(nodes).unwrap();
+            });
+            let r = rx.recv().unwrap();
+            r
+        },
+        |node| node.distance(&end).into(),
+        |node| node.lat == end.lat && node.lon == end.lon,
     )
     .unwrap();
+
+    println!("Path: {:?}", path);
+
     let coords: Vec<LatLon> = path
         .iter()
         .map(|node| LatLon {
@@ -42,5 +66,5 @@ async fn route(data: Data<AppState>, coords: web::Json<RouteRequest>) -> impl Re
         })
         .collect();
 
-    HttpResponse::Ok().json(coords)
+    Ok(HttpResponse::Ok().json(coords))
 }

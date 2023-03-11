@@ -1,4 +1,3 @@
-use mongodb::Client;
 use osmpbfreader::{Node, OsmObj, OsmPbfReader, Way};
 use std::{collections::HashMap, fs::File, sync::Arc};
 
@@ -10,7 +9,7 @@ pub struct Map {
 }
 
 impl Map {
-    pub fn load(file_name: &str, mongo_client: Client) -> Map {
+    pub fn load(file_name: &str) -> Map {
         let mut nodes = HashMap::new();
         let mut node_ways = HashMap::new();
         let mut ways = HashMap::new();
@@ -64,6 +63,10 @@ impl Map {
                 {
                     continue;
                 }
+                let winter = true;
+                if winter && way.tags.contains("winter_service", "no") {
+                    continue;
+                }
                 let new_node = self.nodes.get(&node_id.0).unwrap();
                 // the score starts as the distance between the two nodes
                 let mut move_cost = self.distance(node, new_node) as f32;
@@ -73,10 +76,22 @@ impl Map {
                     move_cost /= 3.0;
                 } else if way.tags.contains("bicyle", "designated")
                     || way.tags.contains("bicyle", "yes")
-                    || way.tags.contains("cycleway", "lane")
                     || way.tags.contains("cycleway", "shared_lane")
+                    || way.tags.contains("cycleway:left", "shared_lane")
+                    || way.tags.contains("cycleway:right", "shared_lane")
+                    || way.tags.contains("cycleway:both", "shared_lane")
+                    || way.tags.contains("cycleway", "opposite_lane")
+                    || way.tags.contains("cycleway:left", "opposite_lane")
+                    || way.tags.contains("cycleway:right", "opposite_lane")
+                    || way.tags.contains("cycleway:both", "opposite_lane")
+                    || way.tags.contains("cycleway", "lane")
                     || way.tags.contains("cycleway:left", "lane")
                     || way.tags.contains("cycleway:right", "lane")
+                    || way.tags.contains("cycleway:both", "lane")
+                    || way.tags.contains("cycleway", "track")
+                    || way.tags.contains("cycleway:left", "track")
+                    || way.tags.contains("cycleway:right", "track")
+                    || way.tags.contains("cycleway:both", "track")
                 {
                     move_cost /= 2.0;
                 } else if way.tags.contains("highway", "primary") {
@@ -96,7 +111,7 @@ impl Map {
                 }
 
                 if way.tags.contains("route", "ferry") {
-                    move_cost *= 5.0;
+                    move_cost *= 100.0;
                 }
                 nodes.push((new_node, move_cost as i32));
             }
