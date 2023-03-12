@@ -64,6 +64,12 @@ impl Map {
                 {
                     continue;
                 }
+
+                let winter = true;
+                if winter && way.tags.contains("winter_service", "no") {
+                    continue;
+                }
+
                 let new_node = self.nodes.get(&node_id.0).unwrap();
                 // the score starts as the distance between the two nodes
                 let mut move_cost = self.distance(node, new_node) as f32;
