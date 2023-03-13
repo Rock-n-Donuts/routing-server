@@ -244,20 +244,20 @@ impl Node {
     }
 }
 
-#[test]
-fn test() {
-    let mut pg_client = Client::connect("host=db user=osm password=osm", postgres::NoTls).unwrap();
-    let node = Node::get(
-        &mut pg_client,
-        Data::new(AppState {
-            node_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-        }),
-        615101618,
-    )
-    .unwrap();
-    node.adjacent_nodes.iter().for_each(|n| {
-        println!("adjacent node: {:?}", n);
-    });
+// #[test]
+// fn test() {
+//     let mut pg_client = Client::connect("host=db user=osm password=osm", postgres::NoTls).unwrap();
+//     let node = Node::get(
+//         &mut pg_client,
+//         Data::new(AppState {
+//             node_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+//         }),
+//         615101618,
+//     )
+//     .unwrap();
+//     node.adjacent_nodes.iter().for_each(|n| {
+//         println!("adjacent node: {:?}", n);
+//     });
 
-    assert!(false);
-}
+//     assert!(false);
+// }
