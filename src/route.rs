@@ -1,6 +1,6 @@
 use std::{error::Error, sync::mpsc};
 
-use crate::{data::node::Node, AppState};
+use crate::{data::{node::Node, way::Way}, AppState};
 use actix_web::{
     post,
     web::{self, Data},
@@ -29,6 +29,8 @@ async fn route(
     println!("Route request: {:?}", coords);
     let mut trx = data.db_pool.acquire().await?;
     let end = Node::closest(&mut *trx, coords.end.lat, coords.end.lng).await?;
+    let ways = Way::get_with_node(&mut *trx, end.id, data.way_cache.clone()).await?;
+    println!("end Ways: {:?}", ways);
     let start = Node::closest(&mut *trx, coords.start.lat, coords.start.lng).await?;
 
     println!("Start: {:?}", start);

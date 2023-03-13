@@ -81,6 +81,15 @@ impl Node {
             FROM planet_osm_line pol
             join planet_osm_ways pow 
               on pol.osm_id = pow.id
+            where 
+                pol.highway is not null and
+                pol.highway != 'motorway' and
+                pol.highway != 'steps' and
+                pol.highway != 'track' and
+                pol.aeroway is NULL and
+                (pol.access != 'no' or pol.access is NULL) and
+                (pol.access != 'private' or pol.access is NULL) and
+                (pol.bicycle != 'no' OR pol.bicycle IS NULL)
             ORDER BY way <-> ST_Transform(ST_SetSRID(ST_MakePoint({}, {}), 4326), 3857)
             LIMIT 1"#,
             lon, lat
@@ -120,11 +129,17 @@ impl Node {
         node_cache: Arc<Mutex<HashMap<i64, Node>>>,
         way_cache: Arc<Mutex<HashMap<i64, Vec<Way>>>>,
     ) -> Result<Vec<(Node, i64)>, NodeError> {
-        println!("successors({})", self.id);
         let mut nodes = Vec::new();
         let ways = Way::get_with_node(trx, self.id, way_cache).await?;
-        println!("ways({})", ways.len());
         for way in ways {
+            if way.has_tag_value("highway", "motorway")
+                || way.has_tag_value("bicycle", "no")
+                || way.has_tag_value("highway", "steps")
+                || (!way.has_tag("highway") && !way.has_tag("bicycle"))
+            {
+                continue;
+            }
+
             let node_index = way
                 .nodes
                 .iter()
@@ -143,26 +158,17 @@ impl Node {
                     continue;
                 }
 
-                if way.has_tag_value("highway", "motorway")
-                    || way.has_tag_value("bicycle", "no")
-                    || way.has_tag_value("highway", "steps")
-                    || (!way.has_tag("highway") && !way.has_tag("bicycle"))
-                {
-                    continue;
-                }
                 let winter = true;
                 if winter && way.has_tag_value("winter_service", "no") {
                     continue;
                 }
-                println!("node_id({})", node_id);
                 let new_node = Node::get(trx, *node_id, &node_cache).await?;
-                println!("new_node({})", new_node.id);
                 // the score starts as the distance between the two nodes
                 let mut move_cost = self.distance(&new_node) as f32;
 
                 // We prefer cycleways
                 if way.has_tag_value("highway", "cycleway") {
-                    move_cost /= 3.0;
+                    move_cost /= 5.0;
                 } else if way.has_tag_value("bicyle", "designated")
                     || way.has_tag_value("bicyle", "yes")
                     || way.has_tag_value("cycleway", "shared_lane")
@@ -205,7 +211,6 @@ impl Node {
                 nodes.push((new_node, move_cost as i64));
             }
         }
-        println!("nodes({})", nodes.len());
         Ok(nodes)
     }
 

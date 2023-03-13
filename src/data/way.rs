@@ -44,18 +44,19 @@ impl Way {
         node_id: i64,
         way_cache: Arc<Mutex<HashMap<i64, Vec<Way>>>>,
     ) -> Result<Vec<Self>, WayError> {
-        if let Some(ways) = way_cache.lock().await.get(&node_id) {
+        let mut way_cache = way_cache.lock().await;
+        if let Some(ways) = way_cache.get(&node_id) {
             return Ok(ways.clone());
         }
         let sql = format!(
             r#"select * 
-                  from planet_osm_ways pow 
-                  where {} = ANY(nodes)"#, node_id
+            from planet_osm_ways pow 
+            where nodes @> array[cast({} as bigint)] and tags is not null"#, node_id
         );
         let ways: Vec<Way> = sqlx::query_as(sql.as_str())
         .fetch_all(trx)
-        .await?;
-        
+        .await.unwrap();
+        way_cache.insert(node_id, ways.clone());
         Ok(ways.clone())
     }
 
