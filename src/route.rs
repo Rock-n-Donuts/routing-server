@@ -1,12 +1,16 @@
-use std::{error::Error, sync::mpsc};
+use std::{error::Error, thread, sync::mpsc};
 
-use crate::{data::{node::Node, way::Way}, AppState};
+use crate::{
+    data::{node::Node},
+    AppState,
+};
 use actix_web::{
     post,
     web::{self, Data},
     HttpResponse, Responder,
 };
 use pathfinding::prelude::astar;
+use postgres::{Client, NoTls};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -23,41 +27,39 @@ struct RouteRequest {
 
 #[post("/route")]
 async fn route(
-    data: Data<AppState>,
+    state: Data<AppState>,
     coords: web::Json<RouteRequest>,
 ) -> Result<impl Responder, Box<dyn Error>> {
     println!("Route request: {:?}", coords);
-    let mut trx = data.db_pool.acquire().await?;
-    let end = Node::closest(&mut *trx, coords.end.lat, coords.end.lng).await?;
-    let ways = Way::get_with_node(&mut *trx, end.id, data.way_cache.clone()).await?;
-    println!("end Ways: {:?}", ways);
-    let start = Node::closest(&mut *trx, coords.start.lat, coords.start.lng).await?;
+    let now = std::time::Instant::now();
+    let (tx, rx) = mpsc::channel();
 
-    println!("Start: {:?}", start);
-    println!("End: {:?}", end);
+    thread::spawn(move || {
+        let mut pg_client = Client::connect("host=db user=osm password=osm", NoTls).unwrap();
+        let end = Node::closest(&mut pg_client, state.clone(), coords.end.lat, coords.end.lng).unwrap();
+        let start = Node::closest(&mut pg_client, state.clone(), coords.start.lat, coords.start.lng).unwrap();
+    
+        println!("Start: {:?}", start);
+        println!("End: {:?}", end);
+    
+            let (path, _score) = astar(
+            &start,
+            |node| -> Vec<(Node, i64)> {
+                node.successors(&mut pg_client, state.clone()).unwrap()
+            },
+            |node| node.distance(&end).into(),
+            |node| {
+                if now.elapsed().as_secs() > 45 {
+                    return true;
+                }
+                node.lat == end.lat && node.lon == end.lon
+            },
+        )
+        .unwrap();
+        tx.send(path).unwrap();
+    });
 
-    let (path, _score) = astar(
-        &start,
-        |node| -> Vec<(Node, i64)> {
-            let node = node.clone();
-            let data = data.clone();
-            let (tx, rx) = mpsc::channel();
-            let rt = data.rt.clone();
-            let node_cache = data.node_cache.clone();
-            let way_cache = data.way_cache.clone();
-            rt.spawn(async move {
-                let mut trx = data.db_pool.acquire().await.unwrap();
-                let nodes = node.successors(&mut *trx, node_cache, way_cache).await.unwrap();
-                tx.send(nodes).unwrap();
-            });
-            let r = rx.recv().unwrap();
-            r
-        },
-        |node| node.distance(&end).into(),
-        |node| node.lat == end.lat && node.lon == end.lon,
-    )
-    .unwrap();
-
+    let path = rx.recv().unwrap();
     println!("Path: {:?}", path);
 
     let coords: Vec<LatLon> = path

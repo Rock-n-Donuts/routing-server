@@ -1,72 +1,116 @@
-use futures::lock::Mutex;
+use crate::AppState;
+use actix_web::web::Data;
+use postgres::Client;
 use serde::{Deserialize, Serialize};
-use sqlx::PgConnection;
-use std::{collections::HashMap, error::Error, sync::Arc};
+use std::{collections::HashMap, error::Error};
 
-use super::way::{Way, WayError};
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AdjacentNode {
+    pub node_id: i64,
+    pub tags: HashMap<String, String>,
+}
 
-#[derive(sqlx::FromRow, Serialize, Deserialize, Debug, Clone, Hash, PartialEq, Eq)]
+impl AdjacentNode {
+    fn has_tag_value(&self, key: &str, value: &str) -> bool {
+        if let Some(v) = self.tags.get(key) {
+            return v == value;
+        }
+        false
+    }
+
+    fn has_tag(&self, key: &str) -> bool {
+        self.tags.contains_key(key)
+    }
+}
+
+impl std::hash::Hash for AdjacentNode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.node_id.hash(state);
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Hash, Eq)]
 pub struct Node {
     pub id: i64,
     /// The latitude in decimicro degrees (10⁻⁷ degrees).
     pub lat: i32,
     /// The longitude in decimicro degrees (10⁻⁷ degrees).
     pub lon: i32,
-}
-
-// Custum error type for the successor function
-#[derive(Debug)]
-pub enum NodeError {
-    SqlxError(sqlx::Error),
-}
-
-impl Error for NodeError {
-    fn description(&self) -> &str {
-        match self {
-            NodeError::SqlxError(_e) => "SqlxError",
-        }
-    }
-}
-
-impl std::fmt::Display for NodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            NodeError::SqlxError(e) => write!(f, "SqlxError: {}", e),
-        }
-    }
-}
-
-impl From<WayError> for NodeError {
-    fn from(error: WayError) -> Self {
-        match error {
-            WayError::SqlxError(e) => NodeError::SqlxError(e),
-        }
-    }
-}
-
-impl From<sqlx::Error> for NodeError {
-    fn from(error: sqlx::Error) -> Self {
-        NodeError::SqlxError(error)
-    }
+    pub adjacent_nodes: Vec<AdjacentNode>,
 }
 
 impl Node {
-    pub async fn get(
-        trx: &mut PgConnection,
+    pub fn get(
+        pg_client: &mut Client,
+        state: Data<AppState>,
         id: i64,
-        node_cache: &Mutex<HashMap<i64, Node>>,
-    ) -> Result<Self, NodeError> {
-        let mut node_cache = node_cache.lock().await;
+    ) -> Result<Self, Box<dyn Error>> {
+        let node_cache = &mut state.node_cache.lock().unwrap();
         if let Some(node) = node_cache.get(&id) {
             return Ok(node.clone());
         }
         let sql = format!(
             r#"select * 
-                  from planet_osm_nodes 
-                  where id = {}"#,
+            from planet_osm_nodes n
+            join planet_osm_ways  w 
+                on w.nodes @> array[n.id] and tags is not null
+            where 
+            n.id = {}
+            "#,
             id
         );
-        let node: Node = sqlx::query_as(sql.as_str()).fetch_one(trx).await?;
+        let rows = pg_client.query(sql.as_str(), &[])?;
+        let mut adjacent_nodes = vec![];
+        let mut lat: i32 = 0;
+        let mut lon: i32 = 0;
+        for row in rows.iter() {
+            lat = row.get("lat");
+            lon = row.get("lon");
+            // We get all the tags
+            let mut tags: HashMap<String, String> = HashMap::new();
+            let tag_strings: Vec<String> = row.get("tags");
+            let mut ts_iter = tag_strings.iter();
+            while let Some(tag) = ts_iter.next() {
+                match ts_iter.next() {
+                    Some(v) => tags.insert(tag.clone(), v.clone()),
+                    None => tags.insert(tag.clone(), "".to_string()),
+                };
+            }
+            println!("nodes: {:?}", row.get::<_, Vec<i64>>("nodes"));
+            println!("Tags: {:?}", tags);
+
+            // We get all the adjacent nodes
+            let nodes: Vec<i64> = row.get("nodes");
+            let node_index = nodes.iter().position(|&x| x == id).unwrap();
+
+            if let Some(next_node) = nodes.get(node_index + 1) {
+                adjacent_nodes.push(AdjacentNode {
+                    node_id: *next_node,
+                    tags: tags.clone(),
+                });
+            }
+
+            // The previous one if we are not in a oneway
+            if node_index > 0 {
+                let prev_node = nodes.get(node_index - 1).unwrap();
+                if tags.get("oneway").unwrap_or(&"".to_string()) != "yes"
+                    && tags.get("oneway:bicycle").unwrap_or(&"".to_string()) != "yes"
+                {
+                    adjacent_nodes.push(AdjacentNode {
+                        node_id: *prev_node,
+                        tags: tags.clone(),
+                    });
+                }
+            }
+        }
+
+        let node = Node {
+            id,
+            lat,
+            lon,
+            adjacent_nodes,
+        };
+
         node_cache.insert(id, node.clone());
         Ok(node)
     }
@@ -75,9 +119,14 @@ impl Node {
         (self.lat.abs_diff(other_node.lat) + self.lon.abs_diff(other_node.lon)) as i32
     }
 
-    pub async fn closest(trx: &mut PgConnection, lat: f64, lon: f64) -> Result<Self, NodeError> {
+    pub fn closest(
+        pg_client: &mut Client,
+        state: Data<AppState>,
+        lat: f64,
+        lon: f64,
+    ) -> Result<Self, Box<dyn Error>> {
         let sql = format!(
-            r#"SELECT pow.*
+            r#"SELECT pow.nodes
             FROM planet_osm_line pol
             join planet_osm_ways pow 
               on pol.osm_id = pow.id
@@ -94,25 +143,14 @@ impl Node {
             LIMIT 1"#,
             lon, lat
         );
-        let way: Way = sqlx::query_as(sql.as_str()).fetch_one(&mut *trx).await?;
-        let mut nodes_in = "(".to_string();
-        for (i, node) in way.nodes.iter().enumerate() {
-            nodes_in.push_str(node.to_string().as_str());
-            if i < way.nodes.len() - 1 {
-                nodes_in.push(',');
-            }
-        }
-        nodes_in.push(')');
-        let sql = format!(
-            r#"SELECT *
-                    FROM planet_osm_nodes 
-                    WHERE id IN {} "#,
-            nodes_in
-        );
-        let mut nodes: Vec<Node> = sqlx::query_as(sql.as_str())
-            .bind(nodes_in)
-            .fetch_all(trx)
-            .await?;
+        let node_ids: Vec<i64> = pg_client.query_one(sql.as_str(), &[])?.get("nodes");
+        let mut nodes = node_ids
+            .iter()
+            .map(|id| {
+                println!("id: {:?}", id);
+                Node::get(pg_client, state.clone(), *id).unwrap()
+            })
+            .collect::<Vec<Node>>();
         nodes.sort_by(|a, b| {
             let a_dist =
                 ((a.lat() - lat) * (a.lat() - lat) + (a.lon() - lon) * (a.lon() - lon)).sqrt();
@@ -123,93 +161,76 @@ impl Node {
         Ok(nodes[0].clone())
     }
 
-    pub async fn successors(
+    pub fn successors(
         &self,
-        trx: &mut PgConnection,
-        node_cache: Arc<Mutex<HashMap<i64, Node>>>,
-        way_cache: Arc<Mutex<HashMap<i64, Vec<Way>>>>,
-    ) -> Result<Vec<(Node, i64)>, NodeError> {
+        pg_client: &mut Client,
+        state: Data<AppState>,
+    ) -> Result<Vec<(Node, i64)>, Box<dyn Error>> {
         let mut nodes = Vec::new();
-        let ways = Way::get_with_node(trx, self.id, way_cache).await?;
-        for way in ways {
-            if way.has_tag_value("highway", "motorway")
-                || way.has_tag_value("bicycle", "no")
-                || way.has_tag_value("highway", "steps")
-                || (!way.has_tag("highway") && !way.has_tag("bicycle"))
+        for a_node in self.adjacent_nodes.clone() {
+            if a_node.has_tag_value("highway", "motorway")
+                || a_node.has_tag_value("bicycle", "no")
+                || a_node.has_tag_value("highway", "steps")
+                || a_node.has_tag_value("access", "private")
+                || (!a_node.has_tag("highway") && !a_node.has_tag("bicycle"))
             {
                 continue;
             }
 
-            let node_index = way
-                .nodes
-                .iter()
-                .position(|node_id| *node_id == self.id)
-                .unwrap();
-            for (i, node_id) in way.nodes.iter().enumerate() {
-                // we keep just the nodes that are next to the current node
-                if (i as i32 - node_index as i32).abs() != 1 {
-                    continue;
-                }
-                // do not go in one way in the opposite direction
-                if !way.has_tag_value("oneway:bicycle", "no")
-                    && way.has_tag_value("oneway", "yes")
-                    && (i as i32 - node_index as i32) != 1
-                {
-                    continue;
-                }
-
-                let winter = true;
-                if winter && way.has_tag_value("winter_service", "no") {
-                    continue;
-                }
-                let new_node = Node::get(trx, *node_id, &node_cache).await?;
-                // the score starts as the distance between the two nodes
-                let mut move_cost = self.distance(&new_node) as f32;
-
-                // We prefer cycleways
-                if way.has_tag_value("highway", "cycleway") {
-                    move_cost /= 5.0;
-                } else if way.has_tag_value("bicyle", "designated")
-                    || way.has_tag_value("bicyle", "yes")
-                    || way.has_tag_value("cycleway", "shared_lane")
-                    || way.has_tag_value("cycleway:left", "shared_lane")
-                    || way.has_tag_value("cycleway:right", "shared_lane")
-                    || way.has_tag_value("cycleway:both", "shared_lane")
-                    || way.has_tag_value("cycleway", "opposite_lane")
-                    || way.has_tag_value("cycleway:left", "opposite_lane")
-                    || way.has_tag_value("cycleway:right", "opposite_lane")
-                    || way.has_tag_value("cycleway:both", "opposite_lane")
-                    || way.has_tag_value("cycleway", "lane")
-                    || way.has_tag_value("cycleway:left", "lane")
-                    || way.has_tag_value("cycleway:right", "lane")
-                    || way.has_tag_value("cycleway:both", "lane")
-                    || way.has_tag_value("cycleway", "track")
-                    || way.has_tag_value("cycleway:left", "track")
-                    || way.has_tag_value("cycleway:right", "track")
-                    || way.has_tag_value("cycleway:both", "track")
-                {
-                    move_cost /= 2.0;
-                } else if way.has_tag_value("highway", "primary") {
-                    move_cost *= 6.0;
-                } else if way.has_tag_value("access", "customers") {
-                    move_cost *= 5.0;
-                } else if way.has_tag_value("bicyle", "dismount") {
-                    move_cost *= 5.0;
-                } else if way.has_tag_value("highway", "footway") {
-                    move_cost *= 2.0;
-                } else if way.has_tag_value("highway", "tertiary") {
-                    move_cost *= 2.0;
-                } else if way.has_tag_value("highway", "path") {
-                    move_cost *= 4.0;
-                } else if way.has_tag_value("highway", "secondary") {
-                    move_cost *= 3.0;
-                }
-
-                if way.has_tag_value("route", "ferry") {
-                    move_cost *= 100.0;
-                }
-                nodes.push((new_node, move_cost as i64));
+            let winter = true;
+            if winter && a_node.has_tag_value("winter_service", "no") {
+                continue;
             }
+            let new_node = Node::get(pg_client, state.clone(), a_node.node_id)?;
+            // the score starts as the distance between the two nodes
+            let mut move_cost = self.distance(&new_node) as f32;
+
+            // We prefer cycleways
+            if a_node.has_tag_value("highway", "cycleway") {
+                move_cost /= 5.0;
+            } else if a_node.has_tag_value("bicyle", "designated")
+                || a_node.has_tag_value("bicyle", "yes")
+                || a_node.has_tag_value("cycleway", "shared_lane")
+                || a_node.has_tag_value("cycleway:left", "shared_lane")
+                || a_node.has_tag_value("cycleway:right", "shared_lane")
+                || a_node.has_tag_value("cycleway:both", "shared_lane")
+                || a_node.has_tag_value("cycleway", "opposite_lane")
+                || a_node.has_tag_value("cycleway:left", "opposite_lane")
+                || a_node.has_tag_value("cycleway:right", "opposite_lane")
+                || a_node.has_tag_value("cycleway:both", "opposite_lane")
+                || a_node.has_tag_value("cycleway", "lane")
+                || a_node.has_tag_value("cycleway:left", "lane")
+                || a_node.has_tag_value("cycleway:right", "lane")
+                || a_node.has_tag_value("cycleway:both", "lane")
+                || a_node.has_tag_value("cycleway", "track")
+                || a_node.has_tag_value("cycleway:left", "track")
+                || a_node.has_tag_value("cycleway:right", "track")
+                || a_node.has_tag_value("cycleway:both", "track")
+            {
+                move_cost /= 2.0;
+            } else if a_node.has_tag_value("highway", "primary") {
+                move_cost *= 6.0;
+            } else if a_node.has_tag_value("access", "customers") {
+                move_cost *= 5.0;
+            } else if a_node.has_tag_value("highway", "footway") {
+                move_cost *= 2.0;
+            } else if a_node.has_tag_value("highway", "tertiary") {
+                move_cost *= 2.0;
+            } else if a_node.has_tag_value("highway", "path") {
+                move_cost *= 4.0;
+            } else if a_node.has_tag_value("highway", "secondary") {
+                move_cost *= 3.0;
+            } else if a_node.has_tag_value("highway", "service") {
+                move_cost *= 3.0;
+            }
+
+            if a_node.has_tag_value("bicyle", "dismount") {
+                move_cost *= 5.0;
+            }
+            if a_node.has_tag_value("route", "ferry") {
+                move_cost *= 100.0;
+            }
+            nodes.push((new_node, move_cost as i64));
         }
         Ok(nodes)
     }
@@ -223,21 +244,20 @@ impl Node {
     }
 }
 
-#[tokio::test]
-async fn test() {
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect("postgres://osm:osm@db/osm")
-        .await
-        .unwrap();
+#[test]
+fn test() {
+    let mut pg_client = Client::connect("host=db user=osm password=osm", postgres::NoTls).unwrap();
+    let node = Node::get(
+        &mut pg_client,
+        Data::new(AppState {
+            node_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }),
+        615101618,
+    )
+    .unwrap();
+    node.adjacent_nodes.iter().for_each(|n| {
+        println!("adjacent node: {:?}", n);
+    });
 
-    let trx = &mut pool.begin().await.unwrap();
-    let node = Node::closest(trx, 45.46085305860483, -73.59282016754152)
-        .await
-        .unwrap_or_else(|e| {
-            println!("{:?}", e);
-            panic!("error")
-        });
-    println!("{:?}", node);
     assert!(false);
 }
