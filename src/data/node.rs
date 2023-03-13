@@ -39,6 +39,13 @@ pub struct Node {
     pub adjacent_nodes: Vec<AdjacentNode>,
 }
 
+fn get_positions<T: PartialEq>(iter: impl Iterator<Item = T>, elem: T) -> Vec<usize> {
+    iter.enumerate()
+        .filter(|(_, e)| *e == elem)
+        .map(|(i, _)| i)
+        .collect()
+}
+
 impl Node {
     pub fn get(
         pg_client: &mut Client,
@@ -79,25 +86,27 @@ impl Node {
 
             // We get all the adjacent nodes
             let nodes: Vec<i64> = row.get("nodes");
-            let node_index = nodes.iter().position(|&x| x == id).unwrap();
+            let node_indexes = get_positions(nodes.iter(), &id);
 
-            if let Some(next_node) = nodes.get(node_index + 1) {
-                adjacent_nodes.push(AdjacentNode {
-                    node_id: *next_node,
-                    tags: tags.clone(),
-                });
-            }
-
-            // The previous one if we are not in a oneway
-            if node_index > 0 {
-                let prev_node = nodes.get(node_index - 1).unwrap();
-                if tags.get("oneway").unwrap_or(&"".to_string()) != "yes"
-                    && tags.get("oneway:bicycle").unwrap_or(&"".to_string()) != "yes"
-                {
+            for node_index in node_indexes {
+                if let Some(next_node) = nodes.get(node_index + 1) {
                     adjacent_nodes.push(AdjacentNode {
-                        node_id: *prev_node,
+                        node_id: *next_node,
                         tags: tags.clone(),
                     });
+                }
+    
+                // The previous one if we are not in a oneway
+                if node_index > 0 {
+                    let prev_node = nodes.get(node_index - 1).unwrap();
+                    if tags.get("oneway").unwrap_or(&"".to_string()) != "yes"
+                        && tags.get("oneway:bicycle").unwrap_or(&"".to_string()) != "yes"
+                    {
+                        adjacent_nodes.push(AdjacentNode {
+                            node_id: *prev_node,
+                            tags: tags.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -129,6 +138,7 @@ impl Node {
             join planet_osm_ways pow 
               on pol.osm_id = pow.id
             where 
+                pol.building is NULL and
                 pol.highway is not null and
                 pol.highway != 'motorway' and
                 pol.highway != 'steps' and
@@ -174,7 +184,7 @@ impl Node {
                 continue;
             }
 
-            let winter = true;
+            let winter = false;
             if winter && a_node.has_tag_value("winter_service", "no") {
                 continue;
             }
@@ -184,8 +194,8 @@ impl Node {
 
             // We prefer cycleways
             if a_node.has_tag_value("highway", "cycleway") {
-                move_cost /= 3.0;
-            } else if a_node.has_tag_value("bicyle", "designated")
+                move_cost /= 4.0;
+            }else if a_node.has_tag_value("bicyle", "designated")
                 || a_node.has_tag_value("bicyle", "yes")
                 || a_node.has_tag_value("cycleway", "shared_lane")
                 || a_node.has_tag_value("cycleway:left", "shared_lane")
