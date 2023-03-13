@@ -76,8 +76,6 @@ impl Node {
                     None => tags.insert(tag.clone(), "".to_string()),
                 };
             }
-            println!("nodes: {:?}", row.get::<_, Vec<i64>>("nodes"));
-            println!("Tags: {:?}", tags);
 
             // We get all the adjacent nodes
             let nodes: Vec<i64> = row.get("nodes");
@@ -147,7 +145,6 @@ impl Node {
         let mut nodes = node_ids
             .iter()
             .map(|id| {
-                println!("id: {:?}", id);
                 Node::get(pg_client, state.clone(), *id).unwrap()
             })
             .collect::<Vec<Node>>();
@@ -187,7 +184,7 @@ impl Node {
 
             // We prefer cycleways
             if a_node.has_tag_value("highway", "cycleway") {
-                move_cost /= 5.0;
+                move_cost /= 3.0;
             } else if a_node.has_tag_value("bicyle", "designated")
                 || a_node.has_tag_value("bicyle", "yes")
                 || a_node.has_tag_value("cycleway", "shared_lane")
