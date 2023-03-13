@@ -1,37 +1,29 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use actix_cors::Cors;
 use actix_web::web::Data;
 use actix_web::{App, HttpServer};
-use mongodb::Client;
-use std::sync::{Arc};
-use map::Map;
+use data::node::Node;
+
+mod data;
 mod route;
-mod map;
 
-
-struct AppState {
-    mongo_client: Client,
-    map: Arc<Map>,
+pub struct AppState {
+    node_cache: Arc<Mutex<HashMap<i64, Node>>>,
 }
-
-
 
 #[actix_web::main] // or #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let mongo_client = Client::with_uri_str("mongodb://osm:osm@mongo:27017")
-        .await
-        .unwrap();
-    let map = Arc::new(Map::load("montreal.pbf", mongo_client.clone()));
-    println!("Map loaded");
+    let node_cache = Arc::new(Mutex::new(HashMap::new()));
     
-    HttpServer::new(move|| {
+    HttpServer::new(move || {
         let cors = Cors::default()
             .allow_any_origin()
             .allow_any_method()
             .allow_any_header();
         App::new()
             .app_data(Data::new(AppState {
-                mongo_client: mongo_client.clone(),
-                map: map.clone(),
+                node_cache: node_cache.clone(),
             }))
             .wrap(cors)
             .service(route::route)
