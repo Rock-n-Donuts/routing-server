@@ -194,7 +194,7 @@ impl Node {
             if a_node.has_tag_value("highway", "cycleway")
                 || a_node.has_tag_value("bicycle", "designated")
             {
-                move_cost /= 40.0;
+                move_cost /= 4.0;
             } else if a_node.has_tag_value("bicycle", "yes")
                 || a_node.has_tag_value("cycleway", "shared_lane")
                 || a_node.has_tag_value("cycleway:left", "shared_lane")
