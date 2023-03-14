@@ -176,6 +176,7 @@ impl Node {
             if a_node.has_tag_value("highway", "motorway")
                 || a_node.has_tag_value("bicycle", "no")
                 || a_node.has_tag_value("highway", "steps")
+                || a_node.has_tag_value("highway", "construction")
                 || a_node.has_tag_value("access", "private")
                 || (!a_node.has_tag("highway") && !a_node.has_tag("bicycle"))
             {
@@ -236,7 +237,7 @@ impl Node {
                 move_cost *= 5.0;
             }
             if a_node.has_tag_value("route", "ferry") {
-                move_cost *= 100.0;
+                continue;
             }
             nodes.push((new_node, move_cost as i64));
         }
