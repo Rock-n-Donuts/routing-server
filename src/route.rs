@@ -31,6 +31,7 @@ async fn route(
     let now = std::time::Instant::now();
     let (tx, rx) = mpsc::channel();
 
+    let coords = coords.into_inner();
     thread::spawn(move || {
         let mut pg_client = Client::connect(
             format!(
@@ -79,13 +80,15 @@ async fn route(
     let path = rx.recv().unwrap();
     println!("Path: {:?}", path);
 
-    let coords: Vec<LatLon> = path
+    let mut response: Vec<LatLon> = path
         .iter()
         .map(|node| LatLon {
             lat: node.lat(),
             lng: node.lon(),
         })
         .collect();
+    response.insert(0, coords.start.clone());
+    response.push(coords.end.clone());
 
-    Ok(HttpResponse::Ok().json(coords))
+    Ok(HttpResponse::Ok().json(response))
 }
