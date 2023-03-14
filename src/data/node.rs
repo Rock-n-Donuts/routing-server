@@ -99,8 +99,8 @@ impl Node {
                 // The previous one if we are not in a oneway
                 if node_index > 0 {
                     let prev_node = nodes.get(node_index - 1).unwrap();
-                    if tags.get("oneway").unwrap_or(&"".to_string()) != "yes"
-                        && tags.get("oneway:bicycle").unwrap_or(&"".to_string()) != "yes"
+                    if !(tags.get("oneway").unwrap_or(&"".to_string()) == "yes"
+                        && tags.get("oneway:bicycle").is_none())
                     {
                         adjacent_nodes.push(AdjacentNode {
                             node_id: *prev_node,
@@ -194,7 +194,7 @@ impl Node {
 
             // We prefer cycleways
             if a_node.has_tag_value("highway", "cycleway") {
-                move_cost /= 3.0;
+                move_cost /= 4.0;
             }else if a_node.has_tag_value("bicyle", "designated")
                 || a_node.has_tag_value("bicyle", "yes")
                 || a_node.has_tag_value("cycleway", "shared_lane")
@@ -261,7 +261,7 @@ impl Node {
 //         Data::new(AppState {
 //             node_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
 //         }),
-//         615101618,
+//         31700826,
 //     )
 //     .unwrap();
 //     node.adjacent_nodes.iter().for_each(|n| {
