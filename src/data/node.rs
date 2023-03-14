@@ -95,7 +95,7 @@ impl Node {
                         tags: tags.clone(),
                     });
                 }
-    
+
                 // The previous one if we are not in a oneway
                 if node_index > 0 {
                     let prev_node = nodes.get(node_index - 1).unwrap();
@@ -154,9 +154,7 @@ impl Node {
         let node_ids: Vec<i64> = pg_client.query_one(sql.as_str(), &[])?.get("nodes");
         let mut nodes = node_ids
             .iter()
-            .map(|id| {
-                Node::get(pg_client, state.clone(), *id).unwrap()
-            })
+            .map(|id| Node::get(pg_client, state.clone(), *id).unwrap())
             .collect::<Vec<Node>>();
         nodes.sort_by(|a, b| {
             let a_dist =
@@ -193,10 +191,11 @@ impl Node {
             let mut move_cost = self.distance(&new_node) as f32;
 
             // We prefer cycleways
-            if a_node.has_tag_value("highway", "cycleway") {
-                move_cost /= 4.0;
-            }else if a_node.has_tag_value("bicyle", "designated")
-                || a_node.has_tag_value("bicyle", "yes")
+            if a_node.has_tag_value("highway", "cycleway")
+                || a_node.has_tag_value("bicycle", "designated")
+            {
+                move_cost /= 40.0;
+            } else if a_node.has_tag_value("bicycle", "yes")
                 || a_node.has_tag_value("cycleway", "shared_lane")
                 || a_node.has_tag_value("cycleway:left", "shared_lane")
                 || a_node.has_tag_value("cycleway:right", "shared_lane")
@@ -225,15 +224,15 @@ impl Node {
                 move_cost *= 3.0;
             } else if a_node.has_tag_value("highway", "service") {
                 move_cost *= 3.0;
-            }else if a_node.has_tag_value("highway", "path") {
+            } else if a_node.has_tag_value("highway", "path") {
                 move_cost *= 4.0;
             } else if a_node.has_tag_value("access", "customers") {
                 move_cost *= 5.0;
             } else if a_node.has_tag_value("highway", "primary") {
                 move_cost *= 6.0;
-            } 
+            }
 
-            if a_node.has_tag_value("bicyle", "dismount") {
+            if a_node.has_tag_value("bicycle", "dismount") {
                 move_cost *= 5.0;
             }
             if a_node.has_tag_value("route", "ferry") {
@@ -261,12 +260,16 @@ impl Node {
 //         Data::new(AppState {
 //             node_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
 //         }),
-//         31700826,
+//         364987802,
 //     )
 //     .unwrap();
 //     node.adjacent_nodes.iter().for_each(|n| {
 //         println!("adjacent node: {:?}", n);
 //     });
+//     let successors = node.successors(&mut pg_client, Data::new(AppState {
+//         node_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+//     })).unwrap();
+//     println!("successors: {:?}", successors);
 
 //     assert!(false);
 // }
