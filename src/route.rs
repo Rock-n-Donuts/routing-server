@@ -1,4 +1,4 @@
-use std::{env, error::Error, sync::mpsc, thread};
+use std::{env, error::Error, thread};
 
 use crate::{data::node::Node, AppState};
 use actix_web::{
@@ -29,10 +29,9 @@ async fn route(
 ) -> Result<impl Responder, Box<dyn Error>> {
     println!("Route request: {:?}", coords);
     let now = std::time::Instant::now();
-    let (tx, rx) = mpsc::channel();
 
     let coords = coords.into_inner();
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         let mut pg_client = Client::connect(
             format!(
                 "host={} user={} password={}",
@@ -74,10 +73,10 @@ async fn route(
             },
         )
         .unwrap();
-        tx.send(path).unwrap();
+        path
     });
 
-    let path = rx.recv().unwrap();
+    let path = handle.join().unwrap();
     println!("Path: {:?}", path);
 
     let mut response: Vec<LatLon> = path
