@@ -194,7 +194,7 @@ impl Node {
 
             // We prefer cycleways
             if a_node.has_tag_value("highway", "cycleway") {
-                move_cost /= 4.0;
+                move_cost /= 3.0;
             }else if a_node.has_tag_value("bicyle", "designated")
                 || a_node.has_tag_value("bicyle", "yes")
                 || a_node.has_tag_value("cycleway", "shared_lane")
@@ -215,21 +215,23 @@ impl Node {
                 || a_node.has_tag_value("cycleway:both", "track")
             {
                 move_cost /= 2.0;
-            } else if a_node.has_tag_value("highway", "primary") {
-                move_cost *= 6.0;
-            } else if a_node.has_tag_value("access", "customers") {
-                move_cost *= 5.0;
             } else if a_node.has_tag_value("highway", "footway") {
+                move_cost *= 2.0;
+            } else if a_node.has_tag_value("bicycle", "dismount") {
                 move_cost *= 2.0;
             } else if a_node.has_tag_value("highway", "tertiary") {
                 move_cost *= 2.0;
-            } else if a_node.has_tag_value("highway", "path") {
-                move_cost *= 4.0;
             } else if a_node.has_tag_value("highway", "secondary") {
                 move_cost *= 3.0;
             } else if a_node.has_tag_value("highway", "service") {
                 move_cost *= 3.0;
-            }
+            }else if a_node.has_tag_value("highway", "path") {
+                move_cost *= 4.0;
+            } else if a_node.has_tag_value("access", "customers") {
+                move_cost *= 5.0;
+            } else if a_node.has_tag_value("highway", "primary") {
+                move_cost *= 6.0;
+            } 
 
             if a_node.has_tag_value("bicyle", "dismount") {
                 move_cost *= 5.0;

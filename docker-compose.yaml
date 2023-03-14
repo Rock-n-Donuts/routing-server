@@ -14,7 +14,11 @@ services:
     ports:
       - 3001:3000
     environment:
-      - DB_URL=mongodb://osm:osm@mongo
+      - DB_NAME=osm
+      - DB_USER=osm
+      - DB_PASSWORD=osm
+      - DB_DATABASE=osm
+      - DB_HOST=db
       - RUST_BACKTRACE=1
   osm2pgsql:
     build: 
