@@ -195,7 +195,7 @@ impl Node {
             if a_node.has_tag_value("highway", "cycleway")
                 || a_node.has_tag_value("bicycle", "designated")
             {
-                move_cost /= 4.0;
+                move_cost /= 2.0;
             } else if a_node.has_tag_value("bicycle", "yes")
                 || a_node.has_tag_value("cycleway", "shared_lane")
                 || a_node.has_tag_value("cycleway:left", "shared_lane")
@@ -214,7 +214,7 @@ impl Node {
                 || a_node.has_tag_value("cycleway:right", "track")
                 || a_node.has_tag_value("cycleway:both", "track")
             {
-                move_cost /= 2.0;
+                move_cost /= 1.5;
             } else if a_node.has_tag_value("highway", "footway") {
                 move_cost *= 2.0;
             } else if a_node.has_tag_value("bicycle", "dismount") {
