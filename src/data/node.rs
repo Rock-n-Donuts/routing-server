@@ -1,8 +1,8 @@
 use crate::AppState;
 use actix_web::web::Data;
-use postgres::Client;
+use postgres::{Client, NoTls};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, error::Error};
+use std::{collections::HashMap, error::Error, env};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AdjacentNode {
@@ -48,25 +48,39 @@ fn get_positions<T: PartialEq>(iter: impl Iterator<Item = T>, elem: T) -> Vec<us
 
 impl Node {
     pub fn get(
-        pg_client: &mut Client,
         state: Data<AppState>,
         id: i64,
     ) -> Result<Self, Box<dyn Error>> {
+        let mut pg_client = Client::connect(
+            format!(
+                "host={} user={} password={}",
+                env::var("DB_HOST").unwrap(),
+                env::var("DB_USER").unwrap(),
+                env::var("DB_PASSWORD").unwrap()
+            )
+            .as_str(),
+            NoTls,
+        )
+        .unwrap();
+
         let node_cache = &mut state.node_cache.lock().unwrap();
         if let Some(node) = node_cache.get(&id) {
             return Ok(node.clone());
         }
-        let sql = format!(
-            r#"select * 
-            from planet_osm_nodes n
-            join planet_osm_ways  w 
-                on w.nodes @> array[n.id] and tags is not null
-            where 
-            n.id = {}
-            "#,
-            id
-        );
-        let rows = pg_client.query(sql.as_str(), &[])?;
+        let sql = r#"select lat, 
+                      lon, 
+                      w.tags as tags, 
+                      nodes 
+                    --   por.tags as relation_tags
+                    from planet_osm_nodes n
+                    join planet_osm_ways  w 
+                        on w.nodes @> array[n.id] and tags is not null
+                    -- left join planet_osm_rels por 
+                    --     on por.parts @> array[w.id]
+                    where 
+                    n.id = $1
+            "#;
+        let rows = pg_client.query(sql, &[&id])?;
         let mut adjacent_nodes = vec![];
         let mut lat: i32 = 0;
         let mut lon: i32 = 0;
@@ -154,7 +168,7 @@ impl Node {
         let node_ids: Vec<i64> = pg_client.query_one(sql.as_str(), &[])?.get("nodes");
         let mut nodes = node_ids
             .iter()
-            .map(|id| Node::get(pg_client, state.clone(), *id).unwrap())
+            .map(|id| Node::get(state.clone(), *id).unwrap())
             .collect::<Vec<Node>>();
         nodes.sort_by(|a, b| {
             let a_dist =
@@ -168,7 +182,6 @@ impl Node {
 
     pub fn successors(
         &self,
-        pg_client: &mut Client,
         state: Data<AppState>,
     ) -> Result<Vec<(Node, i64)>, Box<dyn Error>> {
         let mut nodes = Vec::new();
@@ -187,7 +200,7 @@ impl Node {
             if winter && a_node.has_tag_value("winter_service", "no") {
                 continue;
             }
-            let new_node = Node::get(pg_client, state.clone(), a_node.node_id)?;
+            let new_node = Node::get(state.clone(), a_node.node_id)?;
             // the score starts as the distance between the two nodes
             let mut move_cost = self.distance(&new_node) as f32;
 
@@ -195,7 +208,7 @@ impl Node {
             if a_node.has_tag_value("highway", "cycleway")
                 || a_node.has_tag_value("bicycle", "designated")
             {
-                move_cost /= 4.0;
+                move_cost /= 2.0;
             } else if a_node.has_tag_value("bicycle", "yes")
                 || a_node.has_tag_value("cycleway", "shared_lane")
                 || a_node.has_tag_value("cycleway:left", "shared_lane")
@@ -214,11 +227,9 @@ impl Node {
                 || a_node.has_tag_value("cycleway:right", "track")
                 || a_node.has_tag_value("cycleway:both", "track")
             {
-                move_cost /= 2.0;
+                move_cost /= 1.5;
             } else if a_node.has_tag_value("highway", "footway") {
-                move_cost *= 2.0;
-            } else if a_node.has_tag_value("bicycle", "dismount") {
-                move_cost *= 2.0;
+                move_cost *= 1.5;
             } else if a_node.has_tag_value("highway", "tertiary") {
                 move_cost *= 2.0;
             } else if a_node.has_tag_value("highway", "secondary") {

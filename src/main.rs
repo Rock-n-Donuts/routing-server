@@ -7,6 +7,7 @@ use data::node::Node;
 
 mod data;
 mod route;
+mod astar;
 
 pub struct AppState {
     node_cache: Arc<Mutex<HashMap<i64, Node>>>,

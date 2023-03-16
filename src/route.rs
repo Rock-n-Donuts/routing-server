@@ -1,12 +1,11 @@
 use std::{env, error::Error, thread};
 
-use crate::{data::node::Node, AppState};
+use crate::{astar::astar, data::node::Node, AppState};
 use actix_web::{
     post,
     web::{self, Data},
     HttpResponse, Responder,
 };
-use pathfinding::prelude::astar;
 use postgres::{Client, NoTls};
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +27,6 @@ async fn route(
     coords: web::Json<RouteRequest>,
 ) -> Result<impl Responder, Box<dyn Error>> {
     println!("Route request: {:?}", coords);
-    let now = std::time::Instant::now();
 
     let coords = coords.into_inner();
     let handle = thread::spawn(move || {
@@ -60,19 +58,7 @@ async fn route(
 
         println!("Start: {:?}", start);
         println!("End: {:?}", end);
-
-        let (path, _score) = astar(
-            &start,
-            |node| -> Vec<(Node, i64)> { node.successors(&mut pg_client, state.clone()).unwrap() },
-            |node| node.distance(&end).into(),
-            |node| {
-                if now.elapsed().as_secs() > 45 {
-                    return true;
-                }
-                node.lat == end.lat && node.lon == end.lon
-            },
-        )
-        .unwrap();
+        let (path, _score) = astar(start, end, state).unwrap_or((vec![], 0));
         path
     });
 
