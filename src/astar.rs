@@ -7,15 +7,14 @@ use indexmap::IndexMap;
 use num_traits::Zero;
 use rustc_hash::FxHasher;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap};
+use std::collections::BinaryHeap;
 use std::hash::{BuildHasherDefault, Hash};
-use std::sync::atomic::{AtomicBool};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::usize;
 
-use crate::AppState;
 use crate::data::node::Node;
+use crate::AppState;
 
 type FxIndexMap<K, V> = IndexMap<K, V, BuildHasherDefault<FxHasher>>;
 
@@ -86,32 +85,31 @@ type FxIndexMap<K, V> = IndexMap<K, V, BuildHasherDefault<FxHasher>>;
 /// assert_eq!(result.expect("no path found").1, 4);
 /// ```
 #[allow(clippy::missing_panics_doc)]
-pub fn astar(
-    start: Node,
-    end: Node,
-    state: Data<AppState>
-) -> Option<(Vec<Node>, i64)>
-{
-    let to_see = Arc::new(Mutex::new(BinaryHeap::new()));
-    to_see.lock().unwrap().push(SmallestCostHolder {
-        estimated_cost: Zero::zero(),
-        cost: Zero::zero(),
-        index: 0,
-    });
-    let parents = Arc::new(Mutex::new(FxIndexMap::default()));
-    parents
-        .lock()
-        .unwrap()
-        .insert(start.clone(), (usize::max_value(), Zero::zero()));
-    let pool = Arc::new(rayon::ThreadPoolBuilder::new()
+pub fn astar(start: Node, end: Node, state: Data<AppState>) -> Option<(Vec<Node>, i64)> {
+    let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(22)
         .build()
-        .unwrap());
-    let (tx_to_see_push, rx_to_see_push) = channel();
-    let (tx_success, rx_success) = channel();
-    let done = Arc::new(AtomicBool::new(false));
-    pool.clone().spawn(move || {
+        .unwrap();
+    let response: Arc<Mutex<Option<(Vec<Node>, i64)>>> = Arc::new(Mutex::new(None));
+    let response_clone = response.clone();
+    pool.scope(move |scope| {
+        let response = response_clone;
+        let (tx_to_see_push, rx_to_see_push) = channel();
+        let to_see = Arc::new(Mutex::new(BinaryHeap::new()));
+        to_see.lock().unwrap().push(SmallestCostHolder {
+            estimated_cost: Zero::zero(),
+            cost: Zero::zero(),
+            index: 0,
+        });
+        let parents = Arc::new(Mutex::new(FxIndexMap::default()));
+        parents
+            .lock()
+            .unwrap()
+            .insert(start.clone(), (usize::max_value(), Zero::zero()));
         loop {
+            if response.lock().unwrap().is_some() {
+                break;
+            }
             let mut guard = to_see.lock().unwrap();
             let (cost, index) = match guard.pop() {
                 Some(SmallestCostHolder { cost, index, .. }) => (cost, index),
@@ -125,12 +123,11 @@ pub fn astar(
             let to_see = to_see.clone();
             let parents = parents.clone();
             let tx_to_see_push = tx_to_see_push.clone();
-            let done = done.clone();
-            let tx_success = tx_success.clone();
             let end = end.clone();
             let state = state.clone();
-            pool.spawn(move || {
-                if done.load(std::sync::atomic::Ordering::Relaxed) {
+            let response = response.clone();
+            scope.spawn(move |_scope| {
+                if response.lock().unwrap().is_some() {
                     return;
                 }
                 let successors = {
@@ -138,9 +135,9 @@ pub fn astar(
                     let guard2 = guard.clone();
                     let (node, &(_, c)) = guard2.get_index(index).unwrap(); // Cannot fail
                     if node.lat == end.lat && node.lon == end.lon {
+                        println!("Found path! Cost: {}", cost);
                         let path = reverse_path(guard2.clone(), |&(p, _)| p, index);
-                        done.store(true, std::sync::atomic::Ordering::Relaxed);
-                        tx_success.send(Some((path, cost))).unwrap_or_else(|_|{return;});
+                        response.lock().unwrap().replace((path, cost)) ;
                         return;
                     }
                     drop(guard);
@@ -179,14 +176,17 @@ pub fn astar(
                         cost: new_cost,
                         index: n,
                     });
-                    tx_to_see_push.send(true).unwrap();
+                    tx_to_see_push.send(true).unwrap_or_else(|e| {
+                        println!("Failed to send to to_see_push {:?}", e);
+                    });
                 }
             });
         }
     });
-    let r = rx_success.recv().unwrap();
     println!("Got result");
-    r
+    //returns the response
+    let x = response.lock().unwrap().clone(); 
+    x
 }
 
 struct SmallestCostHolder<K> {
