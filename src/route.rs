@@ -29,7 +29,7 @@ async fn route(
     println!("Route request: {:?}", coords);
 
     let coords = coords.into_inner();
-    let handle = thread::spawn(move || {
+    let path = thread::spawn(move || {
         let mut pg_client = Client::connect(
             format!(
                 "host={} user={} password={}",
@@ -60,10 +60,9 @@ async fn route(
         println!("End: {:?}", end);
         let (path, _score) = astar(start, end, state).unwrap_or((vec![], 0));
         path
-    });
+    }).join().unwrap();
 
-    let path = handle.join().unwrap();
-    println!("Path: {:?}", path);
+    path.iter().for_each(|node| println!("Node: {:?}", node.id));
 
     let mut response: Vec<LatLon> = path
         .iter()
