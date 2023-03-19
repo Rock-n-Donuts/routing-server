@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::env;
+use std::error::Error;
 use std::sync::{Arc, Mutex};
 use actix_cors::Cors;
 use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use data::node::Node;
+use postgres::{NoTls, Client};
 
 mod data;
 mod route;
@@ -31,4 +34,19 @@ async fn main() -> std::io::Result<()> {
     .bind(("0.0.0.0", 3000))?
     .run()
     .await
+}
+
+fn get_pg_client() -> Result<Client, Box<dyn Error>>{
+    let mut pg_client = Client::connect(
+        format!(
+            "host={} user={} password={}",
+            env::var("DB_HOST").unwrap(),
+            env::var("DB_USER").unwrap(),
+            env::var("DB_PASSWORD").unwrap()
+        )
+        .as_str(),
+        NoTls,
+    )
+    .unwrap();
+    Ok(pg_client)
 }

@@ -1,13 +1,14 @@
-use crate::AppState;
+use crate::{get_pg_client, AppState};
 use actix_web::web::Data;
 use postgres::Client;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, error::Error};
+use std::{borrow::BorrowMut, collections::HashMap, error::Error};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AdjacentNode {
     pub node_id: i64,
     pub tags: HashMap<String, String>,
+    pub shortcut: Option<Shortcut>,
 }
 
 impl AdjacentNode {
@@ -26,6 +27,51 @@ impl AdjacentNode {
 impl std::hash::Hash for AdjacentNode {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.node_id.hash(state);
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MetaNode {
+    Node(Node),
+    Shortcut(Shortcut),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Shortcut {
+    pub nodes: Vec<i64>,
+    pub cost: i64,
+}
+
+impl Shortcut {
+    pub fn save(pg_client: &mut Client, path: Vec<MetaNode>, cost: i64) -> Result<(), Box<dyn Error>> {
+        let mut pg_client = get_pg_client().expect("Could not get the database connection");
+        let node_ids = path.iter().fold(vec![], |acc, node| {
+            let mut acc = acc.clone();
+            match node {
+                MetaNode::Node(node) => acc.push(node.id),
+                MetaNode::Shortcut(shortcut) => acc.append(&mut shortcut.nodes.clone()),
+            }
+            acc
+        });
+
+        pg_client
+            .execute(
+                r#"
+                insert into shortcut
+                    (from_node, to_node, cost, nodes) 
+                    values ($1, $2, $3, $4)
+                "#,
+                &[
+                    &node_ids
+                        .first()
+                        .expect("There is no first value in the path"),
+                    &node_ids.last().expect("There is no last value in the path"),
+                    &cost,
+                    &node_ids,
+                ],
+            )
+            .unwrap();
+        Ok(())
     }
 }
 
@@ -93,6 +139,7 @@ impl Node {
                     adjacent_nodes.push(AdjacentNode {
                         node_id: *next_node,
                         tags: tags.clone(),
+                        shortcut: None,
                     });
                 }
 
@@ -105,6 +152,7 @@ impl Node {
                         adjacent_nodes.push(AdjacentNode {
                             node_id: *prev_node,
                             tags: tags.clone(),
+                            shortcut: None,
                         });
                     }
                 }
@@ -166,13 +214,49 @@ impl Node {
         Ok(nodes[0].clone())
     }
 
+    fn get_shortcuts(&self, pg_client: &mut Client) -> Result<Vec<AdjacentNode>, Box<dyn Error>> {
+        let mut shortcuts = vec![];
+        let rows = pg_client.query(
+            r#"
+            select * from shortcut
+            where from_node = $1
+        "#,
+            &[&self.id],
+        )?;
+        for row in rows.iter() {
+            let shortcut = Shortcut {
+                cost: row.get("cost"),
+                nodes: row.get("nodes"),
+            };
+
+            let shortcut = AdjacentNode {
+                node_id: row.get("to_node"),
+                tags: HashMap::from([("highway".to_string(), "shortcut".to_string())]),
+                shortcut: Some(shortcut),
+            };
+            shortcuts.push(shortcut);
+        }
+        Ok(shortcuts)
+    }
+
     pub fn successors(
         &self,
         pg_client: &mut Client,
         state: Data<AppState>,
-    ) -> Result<Vec<(Node, i64)>, Box<dyn Error>> {
-        let mut nodes = Vec::new();
-        for a_node in self.adjacent_nodes.clone() {
+    ) -> Result<Vec<(MetaNode, i64)>, Box<dyn Error>> {
+        let shortcuts = self.get_shortcuts(pg_client.borrow_mut())?;
+        let mut adjacent_nodes = self.adjacent_nodes.clone();
+        adjacent_nodes.extend(shortcuts);
+
+        let mut nodes: Vec<(MetaNode, i64)> = Vec::new();
+        for a_node in adjacent_nodes.clone() {
+            // We use the shortcuts to avoid going through the whole graph
+            if a_node.has_tag_value("highway", "shortcut") {
+                let shortcut = a_node.shortcut.unwrap();
+                nodes.push((MetaNode::Shortcut(shortcut.clone()), shortcut.cost));
+                continue;
+            }
+
             if a_node.has_tag_value("highway", "motorway")
                 || a_node.has_tag_value("bicycle", "no")
                 || a_node.has_tag_value("highway", "steps")
@@ -239,7 +323,7 @@ impl Node {
             if a_node.has_tag_value("route", "ferry") {
                 continue;
             }
-            nodes.push((new_node, move_cost as i64));
+            nodes.push((MetaNode::Node(new_node), move_cost as i64));
         }
         Ok(nodes)
     }

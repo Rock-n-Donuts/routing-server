@@ -1,13 +1,15 @@
-use std::{env, error::Error, thread};
+use std::{borrow::BorrowMut, error::Error, thread};
 
-use crate::{data::node::Node, AppState};
+use crate::{
+    data::node::{MetaNode, Node, Shortcut},
+    get_pg_client, AppState,
+};
 use actix_web::{
     post,
     web::{self, Data},
     HttpResponse, Responder,
 };
 use pathfinding::prelude::astar;
-use postgres::{Client, NoTls};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -31,27 +33,19 @@ async fn route(
     let now = std::time::Instant::now();
 
     let coords = coords.into_inner();
-    let handle = thread::spawn(move || {
-        let mut pg_client = Client::connect(
-            format!(
-                "host={} user={} password={}",
-                env::var("DB_HOST").unwrap(),
-                env::var("DB_USER").unwrap(),
-                env::var("DB_PASSWORD").unwrap()
-            )
-            .as_str(),
-            NoTls,
-        )
-        .unwrap();
+    let state_clone = state.clone();
+    let (path, _cost) = thread::spawn(move || {
+        let mut pg_client = get_pg_client().unwrap();
+        let state = state_clone;
         let end = Node::closest(
-            &mut pg_client,
+            pg_client.borrow_mut(),
             state.clone(),
             coords.end.lat,
             coords.end.lng,
         )
         .unwrap();
         let start = Node::closest(
-            &mut pg_client,
+            &mut pg_client.borrow_mut(),
             state.clone(),
             coords.start.lat,
             coords.start.lng,
@@ -60,32 +54,88 @@ async fn route(
 
         println!("Start: {:?}", start);
         println!("End: {:?}", end);
-
-        let (path, _score) = astar(
-            &start,
-            |node| -> Vec<(Node, i64)> { node.successors(&mut pg_client, state.clone()).unwrap() },
-            |node| node.distance(&end).into(),
+        let mut pg_client2 = get_pg_client().unwrap();
+        let (path, cost) = astar(
+            &MetaNode::Node(start),
+            |node| -> Vec<(MetaNode, i64)> {
+                match node {
+                    MetaNode::Node(node) => node
+                        .successors(pg_client.borrow_mut(), state.clone())
+                        .unwrap(),
+                    MetaNode::Shortcut(shortcut) => {
+                        let node = Node::get(
+                            pg_client.borrow_mut(),
+                            state.clone(),
+                            *shortcut.nodes.last().unwrap(),
+                        )
+                        .unwrap();
+                        node.successors(pg_client.borrow_mut(), state.clone())
+                            .unwrap()
+                    }
+                }
+            },
+            |node| match node {
+                MetaNode::Node(node) => node.distance(&end).into(),
+                MetaNode::Shortcut(shortcut) => shortcut.cost,
+            },
             |node| {
                 if now.elapsed().as_secs() > 45 {
                     return true;
                 }
-                node.lat == end.lat && node.lon == end.lon
+                match node {
+                    MetaNode::Node(node) => node.id == end.id,
+                    MetaNode::Shortcut(shortcut) => {
+                        let node = Node::get(
+                            pg_client2.borrow_mut(),
+                            state.clone(),
+                            *shortcut.nodes.last().unwrap(),
+                        )
+                        .unwrap();
+                        node.id == end.id
+                    }
+                }
             },
         )
         .unwrap();
-        path
+        println!("Path: {:?}", path);
+        // Save the path to the database as a shortcut
+        Shortcut::save(pg_client.borrow_mut(), path.clone(), cost).unwrap();
+        (path, cost)
+    })
+    .join()
+    .unwrap_or_else(|e| {
+        println!("Could get the path data from the thread {:?}", e);
+        panic!();
     });
 
-    let path = handle.join().unwrap();
-    println!("Path: {:?}", path);
+    let state = state.clone();
+    let mut response: Vec<LatLon> = thread::spawn(move || {
+        let mut pg_client = get_pg_client().unwrap();
+        let mut response = vec![];
+        path.iter().for_each(|node| match node {
+            MetaNode::Node(node) => response.push(LatLon {
+                lat: node.lat(),
+                lng: node.lon(),
+            }),
+            MetaNode::Shortcut(shortcut) => {
+                for node_id in shortcut.nodes.iter(){
+                    let node = Node::get(
+                        pg_client.borrow_mut(),
+                        state.clone(),
+                        *shortcut.nodes.last().unwrap(),
+                    ).unwrap();
+                    response.push(LatLon {
+                        lat: node.lat(),
+                        lng: node.lon(),
+                    });
+                }
+            }
+        });
+        response
+    })
+    .join()
+    .unwrap();
 
-    let mut response: Vec<LatLon> = path
-        .iter()
-        .map(|node| LatLon {
-            lat: node.lat(),
-            lng: node.lon(),
-        })
-        .collect();
     response.insert(0, coords.start.clone());
     response.push(coords.end.clone());
 
