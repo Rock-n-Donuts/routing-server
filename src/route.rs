@@ -1,4 +1,4 @@
-use std::{borrow::BorrowMut, error::Error, thread};
+use std::{error::Error, thread, sync::{Mutex, Arc}};
 
 use crate::{
     data::node::{MetaNode, Node, Shortcut},
@@ -35,17 +35,17 @@ async fn route(
     let coords = coords.into_inner();
     let state_clone = state.clone();
     let (path, _cost) = thread::spawn(move || {
-        let mut pg_client = get_pg_client().unwrap();
+        let pg_client = Arc::new(Mutex::new(get_pg_client().unwrap()));
         let state = state_clone;
         let end = Node::closest(
-            pg_client.borrow_mut(),
+            pg_client.clone(),
             state.clone(),
             coords.end.lat,
             coords.end.lng,
         )
         .unwrap();
         let start = Node::closest(
-            &mut pg_client.borrow_mut(),
+            pg_client.clone(),
             state.clone(),
             coords.start.lat,
             coords.start.lng,
@@ -54,22 +54,22 @@ async fn route(
 
         println!("Start: {:?}", start);
         println!("End: {:?}", end);
-        let mut pg_client2 = get_pg_client().unwrap();
         let (path, cost) = astar(
             &MetaNode::Node(start),
             |node| -> Vec<(MetaNode, i64)> {
                 match node {
                     MetaNode::Node(node) => node
-                        .successors(pg_client.borrow_mut(), state.clone())
+                        .successors(pg_client.clone(), state.clone())
                         .unwrap(),
                     MetaNode::Shortcut(shortcut) => {
+                        println!("Shortcut: {:?}", shortcut);
                         let node = Node::get(
-                            pg_client.borrow_mut(),
+                            pg_client.clone(),
                             state.clone(),
                             *shortcut.nodes.last().unwrap(),
                         )
                         .unwrap();
-                        node.successors(pg_client.borrow_mut(), state.clone())
+                        node.successors(pg_client.clone(), state.clone())
                             .unwrap()
                     }
                 }
@@ -86,7 +86,7 @@ async fn route(
                     MetaNode::Node(node) => node.id == end.id,
                     MetaNode::Shortcut(shortcut) => {
                         let node = Node::get(
-                            pg_client2.borrow_mut(),
+                            pg_client.clone(),
                             state.clone(),
                             *shortcut.nodes.last().unwrap(),
                         )
@@ -99,7 +99,7 @@ async fn route(
         .unwrap();
         println!("Path: {:?}", path);
         // Save the path to the database as a shortcut
-        Shortcut::save(pg_client.borrow_mut(), path.clone(), cost).unwrap();
+        // Shortcut::save(pg_client.clone(), path.clone(), cost).unwrap();
         (path, cost)
     })
     .join()
@@ -110,7 +110,7 @@ async fn route(
 
     let state = state.clone();
     let mut response: Vec<LatLon> = thread::spawn(move || {
-        let mut pg_client = get_pg_client().unwrap();
+        let pg_client = Arc::new(Mutex::new(get_pg_client().unwrap()));
         let mut response = vec![];
         path.iter().for_each(|node| match node {
             MetaNode::Node(node) => response.push(LatLon {
@@ -120,9 +120,9 @@ async fn route(
             MetaNode::Shortcut(shortcut) => {
                 for node_id in shortcut.nodes.iter(){
                     let node = Node::get(
-                        pg_client.borrow_mut(),
+                        pg_client.clone(),
                         state.clone(),
-                        *shortcut.nodes.last().unwrap(),
+                        *node_id,
                     ).unwrap();
                     response.push(LatLon {
                         lat: node.lat(),

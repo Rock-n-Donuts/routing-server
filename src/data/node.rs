@@ -1,8 +1,12 @@
-use crate::{get_pg_client, AppState};
+use crate::{AppState};
 use actix_web::web::Data;
 use postgres::Client;
 use serde::{Deserialize, Serialize};
-use std::{borrow::BorrowMut, collections::HashMap, error::Error};
+use std::{
+    collections::HashMap,
+    error::Error,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AdjacentNode {
@@ -43,8 +47,11 @@ pub struct Shortcut {
 }
 
 impl Shortcut {
-    pub fn save(pg_client: &mut Client, path: Vec<MetaNode>, cost: i64) -> Result<(), Box<dyn Error>> {
-        let mut pg_client = get_pg_client().expect("Could not get the database connection");
+    pub fn save(
+        pg_client: Arc<Mutex<Client>>,
+        path: Vec<MetaNode>,
+        cost: i64,
+    ) -> Result<(), Box<dyn Error>> {
         let node_ids = path.iter().fold(vec![], |acc, node| {
             let mut acc = acc.clone();
             match node {
@@ -55,6 +62,8 @@ impl Shortcut {
         });
 
         pg_client
+            .lock()
+            .unwrap()
             .execute(
                 r#"
                 insert into shortcut
@@ -94,7 +103,7 @@ fn get_positions<T: PartialEq>(iter: impl Iterator<Item = T>, elem: T) -> Vec<us
 
 impl Node {
     pub fn get(
-        pg_client: &mut Client,
+        pg_client: Arc<Mutex<Client>>,
         state: Data<AppState>,
         id: i64,
     ) -> Result<Self, Box<dyn Error>> {
@@ -112,7 +121,7 @@ impl Node {
             "#,
             id
         );
-        let rows = pg_client.query(sql.as_str(), &[])?;
+        let rows = pg_client.lock().unwrap().query(sql.as_str(), &[])?;
         let mut adjacent_nodes = vec![];
         let mut lat: i32 = 0;
         let mut lon: i32 = 0;
@@ -175,7 +184,7 @@ impl Node {
     }
 
     pub fn closest(
-        pg_client: &mut Client,
+        pg_client: Arc<Mutex<Client>>,
         state: Data<AppState>,
         lat: f64,
         lon: f64,
@@ -199,10 +208,14 @@ impl Node {
             LIMIT 1"#,
             lon, lat
         );
-        let node_ids: Vec<i64> = pg_client.query_one(sql.as_str(), &[])?.get("nodes");
+        let node_ids: Vec<i64> = pg_client
+            .lock()
+            .unwrap()
+            .query_one(sql.as_str(), &[])?
+            .get("nodes");
         let mut nodes = node_ids
             .iter()
-            .map(|id| Node::get(pg_client, state.clone(), *id).unwrap())
+            .map(|id| Node::get(pg_client.clone(), state.clone(), *id).unwrap())
             .collect::<Vec<Node>>();
         nodes.sort_by(|a, b| {
             let a_dist =
@@ -214,9 +227,12 @@ impl Node {
         Ok(nodes[0].clone())
     }
 
-    fn get_shortcuts(&self, pg_client: &mut Client) -> Result<Vec<AdjacentNode>, Box<dyn Error>> {
+    fn get_shortcuts(
+        &self,
+        pg_client: Arc<Mutex<Client>>,
+    ) -> Result<Vec<AdjacentNode>, Box<dyn Error>> {
         let mut shortcuts = vec![];
-        let rows = pg_client.query(
+        let rows = pg_client.lock().unwrap().query(
             r#"
             select * from shortcut
             where from_node = $1
@@ -241,10 +257,10 @@ impl Node {
 
     pub fn successors(
         &self,
-        pg_client: &mut Client,
+        pg_client: Arc<Mutex<Client>>,
         state: Data<AppState>,
     ) -> Result<Vec<(MetaNode, i64)>, Box<dyn Error>> {
-        let shortcuts = self.get_shortcuts(pg_client.borrow_mut())?;
+        let shortcuts = self.get_shortcuts(pg_client.clone())?;
         let mut adjacent_nodes = self.adjacent_nodes.clone();
         adjacent_nodes.extend(shortcuts);
 
@@ -271,7 +287,7 @@ impl Node {
             if winter && a_node.has_tag_value("winter_service", "no") {
                 continue;
             }
-            let new_node = Node::get(pg_client, state.clone(), a_node.node_id)?;
+            let new_node = Node::get(pg_client.clone(), state.clone(), a_node.node_id)?;
             // the score starts as the distance between the two nodes
             let mut move_cost = self.distance(&new_node) as f32;
 

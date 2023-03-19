@@ -37,7 +37,7 @@ async fn main() -> std::io::Result<()> {
 }
 
 fn get_pg_client() -> Result<Client, Box<dyn Error>>{
-    let mut pg_client = Client::connect(
+    let pg_client = Client::connect(
         format!(
             "host={} user={} password={}",
             env::var("DB_HOST").unwrap(),
