@@ -1,7 +1,7 @@
 use std::{error::Error, thread, sync::{Mutex, Arc}};
 
 use crate::{
-    data::node::{MetaNode, Node, Shortcut},
+    data::node::{MetaNode, Node},
     get_pg_client, AppState,
 };
 use actix_web::{

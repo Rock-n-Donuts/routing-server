@@ -82,6 +82,34 @@ impl Shortcut {
             .unwrap();
         Ok(())
     }
+
+    fn get(
+        node_id: i64,
+        pg_client: Arc<Mutex<Client>>,
+    ) -> Result<Vec<AdjacentNode>, Box<dyn Error>> {
+        let mut shortcuts = vec![];
+        let rows = pg_client.lock().unwrap().query(
+            r#"
+            select * from shortcut
+            where from_node = $1
+        "#,
+            &[&node_id],
+        )?;
+        for row in rows.iter() {
+            let shortcut = Shortcut {
+                cost: row.get("cost"),
+                nodes: row.get("nodes"),
+            };
+
+            let shortcut = AdjacentNode {
+                node_id: row.get("to_node"),
+                tags: HashMap::from([("highway".to_string(), "shortcut".to_string())]),
+                shortcut: Some(shortcut),
+            };
+            shortcuts.push(shortcut);
+        }
+        Ok(shortcuts)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Hash, Eq)]
@@ -227,40 +255,12 @@ impl Node {
         Ok(nodes[0].clone())
     }
 
-    fn get_shortcuts(
-        &self,
-        pg_client: Arc<Mutex<Client>>,
-    ) -> Result<Vec<AdjacentNode>, Box<dyn Error>> {
-        let mut shortcuts = vec![];
-        let rows = pg_client.lock().unwrap().query(
-            r#"
-            select * from shortcut
-            where from_node = $1
-        "#,
-            &[&self.id],
-        )?;
-        for row in rows.iter() {
-            let shortcut = Shortcut {
-                cost: row.get("cost"),
-                nodes: row.get("nodes"),
-            };
-
-            let shortcut = AdjacentNode {
-                node_id: row.get("to_node"),
-                tags: HashMap::from([("highway".to_string(), "shortcut".to_string())]),
-                shortcut: Some(shortcut),
-            };
-            shortcuts.push(shortcut);
-        }
-        Ok(shortcuts)
-    }
-
     pub fn successors(
         &self,
         pg_client: Arc<Mutex<Client>>,
         state: Data<AppState>,
     ) -> Result<Vec<(MetaNode, i64)>, Box<dyn Error>> {
-        let shortcuts = self.get_shortcuts(pg_client.clone())?;
+        let shortcuts = Shortcut::get(self.id, pg_client.clone())?;
         let mut adjacent_nodes = self.adjacent_nodes.clone();
         adjacent_nodes.extend(shortcuts);
 
