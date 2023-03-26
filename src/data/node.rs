@@ -1,4 +1,4 @@
-use crate::{AppState};
+use crate::AppState;
 use actix_web::web::Data;
 use postgres::Client;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,6 @@ use std::{
 pub struct AdjacentNode {
     pub node_id: i64,
     pub tags: HashMap<String, String>,
-    pub shortcut: Option<Shortcut>,
 }
 
 impl AdjacentNode {
@@ -34,83 +33,6 @@ impl std::hash::Hash for AdjacentNode {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum MetaNode {
-    Node(Node),
-    Shortcut(Shortcut),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Shortcut {
-    pub nodes: Vec<i64>,
-    pub cost: i64,
-}
-
-impl Shortcut {
-    pub fn save(
-        pg_client: Arc<Mutex<Client>>,
-        path: Vec<MetaNode>,
-        cost: i64,
-    ) -> Result<(), Box<dyn Error>> {
-        let node_ids = path.iter().fold(vec![], |acc, node| {
-            let mut acc = acc.clone();
-            match node {
-                MetaNode::Node(node) => acc.push(node.id),
-                MetaNode::Shortcut(shortcut) => acc.append(&mut shortcut.nodes.clone()),
-            }
-            acc
-        });
-
-        pg_client
-            .lock()
-            .unwrap()
-            .execute(
-                r#"
-                insert into shortcut
-                    (from_node, to_node, cost, nodes) 
-                    values ($1, $2, $3, $4)
-                "#,
-                &[
-                    &node_ids
-                        .first()
-                        .expect("There is no first value in the path"),
-                    &node_ids.last().expect("There is no last value in the path"),
-                    &cost,
-                    &node_ids,
-                ],
-            )
-            .unwrap();
-        Ok(())
-    }
-
-    fn get(
-        node_id: i64,
-        pg_client: Arc<Mutex<Client>>,
-    ) -> Result<Vec<AdjacentNode>, Box<dyn Error>> {
-        let mut shortcuts = vec![];
-        let rows = pg_client.lock().unwrap().query(
-            r#"
-            select * from shortcut
-            where from_node = $1
-        "#,
-            &[&node_id],
-        )?;
-        for row in rows.iter() {
-            let shortcut = Shortcut {
-                cost: row.get("cost"),
-                nodes: row.get("nodes"),
-            };
-
-            let shortcut = AdjacentNode {
-                node_id: row.get("to_node"),
-                tags: HashMap::from([("highway".to_string(), "shortcut".to_string())]),
-                shortcut: Some(shortcut),
-            };
-            shortcuts.push(shortcut);
-        }
-        Ok(shortcuts)
-    }
-}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Hash, Eq)]
 pub struct Node {
@@ -176,7 +98,6 @@ impl Node {
                     adjacent_nodes.push(AdjacentNode {
                         node_id: *next_node,
                         tags: tags.clone(),
-                        shortcut: None,
                     });
                 }
 
@@ -189,7 +110,6 @@ impl Node {
                         adjacent_nodes.push(AdjacentNode {
                             node_id: *prev_node,
                             tags: tags.clone(),
-                            shortcut: None,
                         });
                     }
                 }
@@ -208,7 +128,19 @@ impl Node {
     }
 
     pub fn distance(&self, other_node: &Node) -> i32 {
-        (self.lat.abs_diff(other_node.lat) + self.lon.abs_diff(other_node.lon)) as i32
+        // We use the haversine formula
+        // https://en.wikipedia.org/wiki/Haversine_formula
+        // https://www.movable-type.co.uk/scripts/latlong.html
+        let lat1 = self.lat as f64 / 10_000_000.0;
+        let lon1 = self.lon as f64 / 10_000_000.0;
+        let lat2 = other_node.lat as f64 / 10_000_000.0;
+        let lon2 = other_node.lon as f64 / 10_000_000.0;
+        let d_lat = (lat2 - lat1).to_radians();
+        let d_lon = (lon2 - lon1).to_radians();
+        let a = (d_lat / 2.0).sin() * (d_lat / 2.0).sin()
+            + (d_lon / 2.0).sin() * (d_lon / 2.0).sin() * lat1.to_radians().cos() * lat2.to_radians().cos();
+        let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
+        (6_371_000.0 * c) as i32
     }
 
     pub fn closest(
@@ -259,20 +191,10 @@ impl Node {
         &self,
         pg_client: Arc<Mutex<Client>>,
         state: Data<AppState>,
-    ) -> Result<Vec<(MetaNode, i64)>, Box<dyn Error>> {
-        let shortcuts = Shortcut::get(self.id, pg_client.clone())?;
-        let mut adjacent_nodes = self.adjacent_nodes.clone();
-        adjacent_nodes.extend(shortcuts);
-
-        let mut nodes: Vec<(MetaNode, i64)> = Vec::new();
+    ) -> Result<Vec<(Node, i64)>, Box<dyn Error>> {
+        let adjacent_nodes = self.adjacent_nodes.clone();
+        let mut nodes: Vec<(Node, i64)> = Vec::new();
         for a_node in adjacent_nodes.clone() {
-            // We use the shortcuts to avoid going through the whole graph
-            if a_node.has_tag_value("highway", "shortcut") {
-                let shortcut = a_node.shortcut.unwrap();
-                nodes.push((MetaNode::Shortcut(shortcut.clone()), shortcut.cost));
-                continue;
-            }
-
             if a_node.has_tag_value("highway", "motorway")
                 || a_node.has_tag_value("bicycle", "no")
                 || a_node.has_tag_value("highway", "steps")
@@ -283,65 +205,76 @@ impl Node {
                 continue;
             }
 
-            let winter = false;
+            let winter = true;
             if winter && a_node.has_tag_value("winter_service", "no") {
                 continue;
             }
-            let new_node = Node::get(pg_client.clone(), state.clone(), a_node.node_id)?;
-            // the score starts as the distance between the two nodes
-            let mut move_cost = self.distance(&new_node) as f32;
+            let (new_node, move_cost) =
+                self.calculate_cost(pg_client.clone(), state.clone(), a_node);
 
-            // We prefer cycleways
-            if a_node.has_tag_value("highway", "cycleway")
-                || a_node.has_tag_value("bicycle", "designated")
-            {
-                move_cost /= 2.0;
-            } else if a_node.has_tag_value("bicycle", "yes")
-                || a_node.has_tag_value("cycleway", "shared_lane")
-                || a_node.has_tag_value("cycleway:left", "shared_lane")
-                || a_node.has_tag_value("cycleway:right", "shared_lane")
-                || a_node.has_tag_value("cycleway:both", "shared_lane")
-                || a_node.has_tag_value("cycleway", "opposite_lane")
-                || a_node.has_tag_value("cycleway:left", "opposite_lane")
-                || a_node.has_tag_value("cycleway:right", "opposite_lane")
-                || a_node.has_tag_value("cycleway:both", "opposite_lane")
-                || a_node.has_tag_value("cycleway", "lane")
-                || a_node.has_tag_value("cycleway:left", "lane")
-                || a_node.has_tag_value("cycleway:right", "lane")
-                || a_node.has_tag_value("cycleway:both", "lane")
-                || a_node.has_tag_value("cycleway", "track")
-                || a_node.has_tag_value("cycleway:left", "track")
-                || a_node.has_tag_value("cycleway:right", "track")
-                || a_node.has_tag_value("cycleway:both", "track")
-            {
-                move_cost /= 1.5;
-            } else if a_node.has_tag_value("highway", "footway") {
-                move_cost *= 2.0;
-            } else if a_node.has_tag_value("bicycle", "dismount") {
-                move_cost *= 2.0;
-            } else if a_node.has_tag_value("highway", "tertiary") {
-                move_cost *= 2.0;
-            } else if a_node.has_tag_value("highway", "secondary") {
-                move_cost *= 3.0;
-            } else if a_node.has_tag_value("highway", "service") {
-                move_cost *= 3.0;
-            } else if a_node.has_tag_value("highway", "path") {
-                move_cost *= 4.0;
-            } else if a_node.has_tag_value("access", "customers") {
-                move_cost *= 5.0;
-            } else if a_node.has_tag_value("highway", "primary") {
-                move_cost *= 6.0;
-            }
-
-            if a_node.has_tag_value("bicycle", "dismount") {
-                move_cost *= 5.0;
-            }
-            if a_node.has_tag_value("route", "ferry") {
-                continue;
-            }
-            nodes.push((MetaNode::Node(new_node), move_cost as i64));
+            nodes.push((new_node, move_cost as i64));
         }
         Ok(nodes)
+    }
+
+    pub fn calculate_cost(
+        &self,
+        pg_client: Arc<Mutex<Client>>,
+        state: Data<AppState>,
+        a_node: AdjacentNode,
+    ) -> (Node, i64) {
+        let other_node = Node::get(pg_client.clone(), state.clone(), a_node.node_id).unwrap();
+        let mut move_cost = self.distance(&other_node) as f32;
+
+        // We prefer cycleways
+        if a_node.has_tag_value("highway", "cycleway")
+            || a_node.has_tag_value("bicycle", "designated")
+        {
+            move_cost *= 0.5;
+        } else if a_node.has_tag_value("bicycle", "yes")
+            || a_node.has_tag_value("cycleway", "shared_lane")
+            || a_node.has_tag_value("cycleway:left", "shared_lane")
+            || a_node.has_tag_value("cycleway:right", "shared_lane")
+            || a_node.has_tag_value("cycleway:both", "shared_lane")
+            || a_node.has_tag_value("cycleway", "opposite_lane")
+            || a_node.has_tag_value("cycleway:left", "opposite_lane")
+            || a_node.has_tag_value("cycleway:right", "opposite_lane")
+            || a_node.has_tag_value("cycleway:both", "opposite_lane")
+            || a_node.has_tag_value("cycleway", "lane")
+            || a_node.has_tag_value("cycleway:left", "lane")
+            || a_node.has_tag_value("cycleway:right", "lane")
+            || a_node.has_tag_value("cycleway:both", "lane")
+            || a_node.has_tag_value("cycleway", "track")
+            || a_node.has_tag_value("cycleway:left", "track")
+            || a_node.has_tag_value("cycleway:right", "track")
+            || a_node.has_tag_value("cycleway:both", "track")
+        {
+            move_cost *= 0.75;
+        } else if a_node.has_tag_value("highway", "footway") {
+            move_cost *= 1.2;
+        } else if a_node.has_tag_value("bicycle", "dismount") {
+            move_cost *= 1.2;
+        } else if a_node.has_tag_value("highway", "tertiary") {
+            move_cost *= 1.3;
+        } else if a_node.has_tag_value("highway", "secondary") {
+            move_cost *= 1.3;
+        } else if a_node.has_tag_value("highway", "service") {
+            move_cost *= 1.3;
+        } else if a_node.has_tag_value("highway", "path") {
+            move_cost *= 1.4;
+        } else if a_node.has_tag_value("access", "customers") {
+            move_cost *= 1.5;
+        } else if a_node.has_tag_value("highway", "primary") {
+            move_cost *= 1.6;
+        }
+
+        if a_node.has_tag_value("bicycle", "dismount") {
+            move_cost *= 1.5;
+        }
+        if a_node.has_tag_value("route", "ferry") {
+            move_cost *= 100.0;
+        }
+        (other_node, move_cost as i64)
     }
 
     pub fn lat(&self) -> f64 {
