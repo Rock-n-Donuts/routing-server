@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::error::Error;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use actix_cors::Cors;
 use actix_web::web::Data;
 use actix_web::{App, HttpServer};
@@ -12,12 +12,12 @@ mod data;
 mod route;
 
 pub struct AppState {
-    node_cache: Arc<Mutex<HashMap<i64, Node>>>,
+    node_cache: Arc<RwLock<HashMap<i64, Node>>>,
 }
 
 #[actix_web::main] // or #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let node_cache = Arc::new(Mutex::new(HashMap::new()));
+    let node_cache = Arc::new(RwLock::new(HashMap::new()));
     
     HttpServer::new(move || {
         let cors = Cors::default()
