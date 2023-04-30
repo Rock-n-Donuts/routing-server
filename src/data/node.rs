@@ -1,17 +1,17 @@
 use crate::{
+    astar::astar,
     get_pg_client,
     route::{Model, RouteRequest},
     AppState,
 };
 use actix_web::web::Data;
-use pathfinding::prelude::astar;
-use postgres::Client;
 use serde::{Deserialize, Serialize};
+use sqlx::{pool::PoolConnection, Postgres, Row};
+use tokio::sync::Mutex;
 use std::{
     collections::HashMap,
     error::Error,
-    sync::{Arc, Mutex},
-    thread,
+    sync::{Arc},
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -57,25 +57,32 @@ fn get_positions<T: PartialEq>(iter: impl Iterator<Item = T>, elem: T) -> Vec<us
 }
 
 impl Node {
-    pub fn get(
-        pg_client: Arc<Mutex<Client>>,
+    pub async fn get(
+        pg_client: Arc<Mutex<PoolConnection<Postgres>>>,
         state: Data<AppState>,
         id: i64,
     ) -> Result<Self, Box<dyn Error>> {
+        println!("get node {}", id);
+
         if let Some(node) = state.node_cache.read().unwrap().get(&id) {
             return Ok(node.clone());
         }
-        let sql = format!(
-            r#"select * 
+        // let mut pg_client = get_pg_client().await?;
+        let mut pg_client = pg_client.lock().await;
+        let rows = sqlx::query(
+            r#"
+            select * 
             from planet_osm_nodes n
             join planet_osm_ways  w 
                 on w.nodes @> array[n.id] and tags is not null
             where 
-            n.id = {}
-            "#,
-            id
-        );
-        let rows = pg_client.lock().unwrap().query(sql.as_str(), &[])?;
+            n.id = $1
+        "#,
+        )
+        .bind(id)
+        .fetch_all(pg_client.as_mut())
+        .await?;
+        println!("got rows for {}", id);
         let mut adjacent_nodes = vec![];
         let mut lat: i32 = 0;
         let mut lon: i32 = 0;
@@ -150,41 +157,46 @@ impl Node {
         (6_371_000.0 * c) as i32
     }
 
-    pub fn closest(
-        pg_client: Arc<Mutex<Client>>,
+    pub async fn closest(
+        pg_client: Arc<Mutex<PoolConnection<Postgres>>>,
         state: Data<AppState>,
         lat: f64,
         lon: f64,
     ) -> Result<Self, Box<dyn Error>> {
-        let sql = format!(
+        println!("closest for {}, {}", lat, lon);
+        let node_ids: Vec<i64> = sqlx::query(
             r#"SELECT pow.nodes
-            FROM planet_osm_line pol
-            join planet_osm_ways pow 
-              on pol.osm_id = pow.id
-            where 
-                pol.building is NULL and
-                pol.highway is not null and
-                pol.highway != 'motorway' and
-                pol.highway != 'motorway_link' and
-                pol.highway != 'steps' and
-                pol.highway != 'track' and
-                pol.aeroway is NULL and
-                (pol.access != 'no' or pol.access is NULL) and
-                (pol.access != 'private' or pol.access is NULL) and
-                (pol.bicycle != 'no' OR pol.bicycle IS NULL)
-            ORDER BY way <-> ST_Transform(ST_SetSRID(ST_MakePoint({}, {}), 4326), 3857)
-            LIMIT 1"#,
-            lon, lat
-        );
-        let node_ids: Vec<i64> = pg_client
-            .lock()
-            .unwrap()
-            .query_one(sql.as_str(), &[])?
-            .get("nodes");
-        let mut nodes = node_ids
-            .iter()
-            .map(|id| Node::get(pg_client.clone(), state.clone(), *id).unwrap())
-            .collect::<Vec<Node>>();
+                    FROM planet_osm_line pol
+                    join planet_osm_ways pow 
+                    on pol.osm_id = pow.id
+                    where 
+                        pol.building is NULL and
+                        pol.highway is not null and
+                        pol.highway != 'motorway' and
+                        pol.highway != 'motorway_link' and
+                        pol.highway != 'steps' and
+                        pol.highway != 'track' and
+                        pol.aeroway is NULL and
+                        (pol.access != 'no' or pol.access is NULL) and
+                        (pol.access != 'private' or pol.access is NULL) and
+                        (pol.bicycle != 'no' OR pol.bicycle IS NULL)
+                    ORDER BY way <-> ST_Transform(ST_SetSRID(ST_MakePoint($1, $2), 4326), 3857)
+                    LIMIT 1"#,
+        )
+        .bind(lon)
+        .bind(lat)
+        .fetch_one(pg_client.lock().await.as_mut())
+        .await?
+        .get("nodes");
+
+        println!("got node ids for {}, {}", lat, lon);
+
+        let mut nodes = vec![];
+        for id in node_ids {
+            let node = Node::get(pg_client.to_owned(), state.clone(), id).await?;
+            nodes.push(node);
+        }
+
         nodes.sort_by(|a, b| {
             let a_dist =
                 ((a.lat() - lat) * (a.lat() - lat) + (a.lon() - lon) * (a.lon() - lon)).sqrt();
@@ -192,18 +204,18 @@ impl Node {
                 ((b.lat() - lat) * (b.lat() - lat) + (b.lon() - lon) * (b.lon() - lon)).sqrt();
             a_dist.partial_cmp(&b_dist).unwrap()
         });
+        println!("The closest node is {}", nodes[0].id);
         Ok(nodes[0].clone())
     }
 
-    pub fn successors(
+    pub async fn successors(
         &self,
-        pg_client: Arc<Mutex<Client>>,
+        pg_client: Arc<Mutex<PoolConnection<Postgres>>>,
         state: Data<AppState>,
         model: Model,
     ) -> Result<Vec<(Node, i64)>, Box<dyn Error>> {
-        let adjacent_nodes = self.adjacent_nodes.clone();
         let mut nodes: Vec<(Node, i64)> = Vec::new();
-        for a_node in adjacent_nodes.clone() {
+        for a_node in self.adjacent_nodes.to_owned() {
             if a_node.has_tag_value("highway", "motorway")
                 || a_node.has_tag_value("highway", "motorway_link")
                 || a_node.has_tag_value("bicycle", "no")
@@ -222,8 +234,14 @@ impl Node {
                 continue;
             }
             let (new_node, move_cost) = match model {
-                Model::Fast => self.calculate_cost_fast(pg_client.clone(), state.clone(), a_node),
-                Model::Safe => self.calculate_cost_safe(pg_client.clone(), state.clone(), a_node),
+                Model::Fast => {
+                    self.calculate_cost_fast(pg_client.to_owned(), state.clone(), a_node)
+                        .await?
+                }
+                Model::Safe => {
+                    self.calculate_cost_safe(pg_client.to_owned(), state.clone(), a_node)
+                        .await?
+                }
             };
 
             nodes.push((new_node, move_cost as i64));
@@ -231,13 +249,15 @@ impl Node {
         Ok(nodes)
     }
 
-    pub fn calculate_cost_safe(
+    pub async fn calculate_cost_safe(
         &self,
-        pg_client: Arc<Mutex<Client>>,
+        pg_client: Arc<Mutex<PoolConnection<Postgres>>>,
         state: Data<AppState>,
         a_node: AdjacentNode,
-    ) -> (Node, i64) {
-        let other_node = Node::get(pg_client.clone(), state.clone(), a_node.node_id).unwrap();
+    ) -> Result<(Node, i64), Box<dyn Error>> {
+        println!("calculate_cost_safe for {} and {}", self.id, a_node.node_id);
+        let other_node = Node::get(pg_client.to_owned(), state.to_owned(), a_node.node_id).await?;
+        println!("got other node {}", other_node.id);
         let mut move_cost = self.distance(&other_node) as f32;
 
         // We prefer cycleways
@@ -265,7 +285,7 @@ impl Node {
         {
             move_cost *= 0.8
         } else if a_node.has_tag_value("highway", "footway") {
-            if !a_node.has_tag_value("bicycle", "no"){
+            if !a_node.has_tag_value("bicycle", "no") {
                 move_cost *= 1.2;
             } else {
                 move_cost *= 10.0;
@@ -303,16 +323,16 @@ impl Node {
                 }
             }
         }
-        (other_node, move_cost as i64)
+        Ok((other_node, move_cost as i64))
     }
 
-    pub fn calculate_cost_fast(
+    pub async fn calculate_cost_fast(
         &self,
-        pg_client: Arc<Mutex<Client>>,
+        pg_client: Arc<Mutex<PoolConnection<Postgres>>>,
         state: Data<AppState>,
         a_node: AdjacentNode,
-    ) -> (Node, i64) {
-        let other_node = Node::get(pg_client.clone(), state.clone(), a_node.node_id).unwrap();
+    ) -> Result<(Node, i64), Box<dyn Error>> {
+        let other_node = Node::get(pg_client, state.clone(), a_node.node_id).await?;
         let mut move_cost = self.distance(&other_node) as f32;
 
         // We prefer cycleways
@@ -343,9 +363,9 @@ impl Node {
             move_cost *= 5.0;
         } else if a_node.has_tag_value("surface", "gravel") {
             move_cost *= 1.1;
-        }else if a_node.has_tag_value("surface", "dirt") {
+        } else if a_node.has_tag_value("surface", "dirt") {
             move_cost *= 5.0;
-        }  else if a_node.has_tag_value("bicycle", "dismount") {
+        } else if a_node.has_tag_value("bicycle", "dismount") {
             move_cost *= 3.0;
         } else if a_node.has_tag_value("highway", "tertiary") {
             move_cost *= 1.1;
@@ -367,7 +387,7 @@ impl Node {
             move_cost *= 100.0;
         }
 
-        (other_node, move_cost as i64)
+        Ok((other_node, move_cost as i64))
     }
 
     pub fn lat(&self) -> f64 {
@@ -378,50 +398,38 @@ impl Node {
         self.lon as f64 / 10_000_000.0
     }
 
-    pub fn route(coords: &RouteRequest, state: Data<AppState>) -> (Vec<Node>, i64) {
+    pub async fn route(
+        coords: &RouteRequest,
+        state: Data<AppState>,
+    ) -> Result<(Vec<Node>, i64), Box<dyn Error>> {
         let now = std::time::Instant::now();
-        let coords = coords.clone();
-        let (path, _cost) = thread::spawn(move || {
-            let pg_client = Arc::new(Mutex::new(get_pg_client().unwrap()));
-            let end = Node::closest(
-                pg_client.clone(),
-                state.clone(),
-                coords.end.lat,
-                coords.end.lng,
-            )
-            .unwrap();
-            let start = Node::closest(
-                pg_client.clone(),
-                state.clone(),
-                coords.start.lat,
-                coords.start.lng,
-            )
-            .unwrap();
-
-            let (path, cost) = astar(
-                &start,
-                |node| -> Vec<(Node, i64)> {
-                    node.successors(pg_client.clone(), state.clone(), coords.model.clone())
-                        .unwrap()
-                },
-                |node| node.distance(&end).into(),
-                |node| {
-                    if now.elapsed().as_secs() > 60 {
-                        return true;
-                    }
-                    node.id == end.id
-                },
-            )
-            .unwrap();
-            println!("Path: {:?}", path);
-            (path, cost)
-        })
-        .join()
-        .unwrap_or_else(|e| {
-            println!("Could get the path data from the thread {:?}", e);
-            panic!();
-        });
-        (path, _cost)
+        let coords = coords.to_owned();
+        let client = Arc::new(Mutex::new(get_pg_client().await?));
+        let end = Node::closest(client.to_owned(), state.to_owned(), coords.end.lat, coords.end.lng).await?;
+        let start =
+            Node::closest(client.to_owned(), state.to_owned(), coords.start.lat, coords.start.lng).await?;
+        let (path, cost) = astar(
+            &start,
+             |node: &Node| {
+                let client = client.to_owned();
+                let state = state.to_owned();
+                Box::pin(async move {
+                    node.successors(client, state.to_owned(), Model::Safe)
+                        .await.unwrap()
+                        
+                })
+            },
+            |node| node.distance(&end).into(),
+            |node| {
+                if now.elapsed().as_secs() > 60 {
+                    return true;
+                }
+                node.id == end.id
+            },
+        )
+        .await
+        .unwrap();
+        Ok((path, cost))
     }
 }
 

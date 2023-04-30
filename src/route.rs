@@ -35,12 +35,8 @@ async fn route(
     state: Data<AppState>,
     coords: web::Json<RouteRequest>,
 ) -> Result<impl Responder, Box<dyn Error>> {
-    println!("Route request: {:?}", coords);
-
     let coords = coords.into_inner();
-
-    let (path, _cost) = Node::route(&coords, state.clone());
-
+    let (path, _cost) = Node::route(&coords, state.clone()).await?;
     let mut response: Vec<LatLon> = thread::spawn(move || {
         let mut response = vec![];
         path.iter().for_each(|node| {
