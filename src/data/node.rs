@@ -7,12 +7,8 @@ use crate::{
 use actix_web::web::Data;
 use serde::{Deserialize, Serialize};
 use sqlx::{pool::PoolConnection, Postgres, Row};
+use std::{collections::HashMap, error::Error, sync::Arc};
 use tokio::sync::Mutex;
-use std::{
-    collections::HashMap,
-    error::Error,
-    sync::{Arc},
-};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AdjacentNode {
@@ -404,18 +400,29 @@ impl Node {
         let now = std::time::Instant::now();
         let coords = coords.to_owned();
         let client = Arc::new(Mutex::new(get_pg_client().await?));
-        let end = Node::closest(client.to_owned(), state.to_owned(), coords.end.lat, coords.end.lng).await?;
-        let start =
-            Node::closest(client.to_owned(), state.to_owned(), coords.start.lat, coords.start.lng).await?;
+        let end = Node::closest(
+            client.to_owned(),
+            state.to_owned(),
+            coords.end.lat,
+            coords.end.lng,
+        )
+        .await?;
+        let start = Node::closest(
+            client.to_owned(),
+            state.to_owned(),
+            coords.start.lat,
+            coords.start.lng,
+        )
+        .await?;
         let (path, cost) = astar(
             &start,
-             |node: &Node| {
+            |node: &Node| {
                 let client = client.to_owned();
                 let state = state.to_owned();
                 Box::pin(async move {
                     node.successors(client, state.to_owned(), Model::Safe)
-                        .await.unwrap()
-                        
+                        .await
+                        .unwrap()
                 })
             },
             |node| node.distance(&end).into(),
