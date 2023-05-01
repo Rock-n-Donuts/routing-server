@@ -67,7 +67,6 @@ impl Node {
         if let Some(node) = state.node_cache.read().unwrap().get(&id) {
             return Ok(node.clone());
         }
-        // let mut pg_client = get_pg_client().await?;
         let mut pg_client = pg_client.lock().await;
         let rows = sqlx::query(
             r#"
