@@ -108,7 +108,6 @@ impl Node {
             // We get all the tags
             let mut tags: HashMap<String, String> = HashMap::new();
             let tag_strings: Vec<String> = row.try_get("tags").unwrap_or(vec![]);
-            println!("tags: {:?}", tag_strings);
             let mut ts_iter = tag_strings.iter();
             while let Some(tag) = ts_iter.next() {
                 match ts_iter.next() {
@@ -215,7 +214,6 @@ impl Node {
         lat: f64,
         lon: f64,
     ) -> Result<Self, Box<dyn Error>> {
-        println!("closest for {}, {}", lat, lon);
         let node_ids: Vec<i64> = sqlx::query(
             r#"SELECT pow.nodes
                     FROM planet_osm_line pol
@@ -254,7 +252,6 @@ impl Node {
                 ((b.lat() - lat) * (b.lat() - lat) + (b.lon() - lon) * (b.lon() - lon)).sqrt();
             a_dist.partial_cmp(&b_dist).unwrap()
         });
-        println!("The closest node is {}", nodes[0].id);
         Ok(nodes[0].clone())
     }
 
@@ -264,7 +261,6 @@ impl Node {
         model: Model,
     ) -> Result<Vec<(Node, i64)>, Box<dyn Error>> {
         let mut nodes: Vec<(Node, i64)> = Vec::new();
-        println!("adjacent nodes: {:?}", self.adjacent_nodes);
         for a_node in &self.adjacent_nodes {
             if a_node.has_tag_value("highway", "motorway")
                 || a_node.has_tag_value("highway", "motorway_link")
