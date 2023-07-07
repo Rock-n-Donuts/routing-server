@@ -14,11 +14,7 @@ services:
     ports:
       - 3001:3000
     environment:
-      - DB_NAME=osm
-      - DB_USER=osm
-      - DB_PASSWORD=osm
-      - DB_DATABASE=osm
-      - DB_HOST=db
+      - DATABASE_URL=postgres://osm:osm@db/osm
       - RUST_BACKTRACE=1
   osm2pgsql:
     build: 

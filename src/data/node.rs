@@ -2,18 +2,25 @@ use crate::{
     astar::astar,
     get_pg_client,
     route::{Model, RouteRequest},
-    AppState,
 };
-use actix_web::web::Data;
 use serde::{Deserialize, Serialize};
 use sqlx::{pool::PoolConnection, Postgres, Row};
-use std::{collections::HashMap, error::Error, sync::Arc};
-use tokio::sync::Mutex;
+use std::{collections::HashMap, error::Error, ops::DerefMut, sync::Arc};
+use tokio::sync::{Mutex, RwLock};
+
+fn get_positions<T: PartialEq>(iter: impl Iterator<Item = T>, elem: T) -> Vec<usize> {
+    iter.enumerate()
+        .filter(|(_, e)| *e == elem)
+        .map(|(i, _)| i)
+        .collect()
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AdjacentNode {
     pub node_id: i64,
     pub tags: HashMap<String, String>,
+    pub distance: i32,
+    pub intermediate_nodes: Option<Vec<i64>>,
 }
 
 impl AdjacentNode {
@@ -35,6 +42,25 @@ impl std::hash::Hash for AdjacentNode {
     }
 }
 
+pub fn distance(lat1: i32, lon1: i32, lat2: i32, lon2: i32) -> i32 {
+    // We use the haversine formula
+    // https://en.wikipedia.org/wiki/Haversine_formula
+    // https://www.movable-type.co.uk/scripts/latlong.html
+    let lat1 = lat1 as f64 / 10_000_000.0;
+    let lon1 = lon1 as f64 / 10_000_000.0;
+    let lat2 = lat2 as f64 / 10_000_000.0;
+    let lon2 = lon2 as f64 / 10_000_000.0;
+    let d_lat = (lat2 - lat1).to_radians();
+    let d_lon = (lon2 - lon1).to_radians();
+    let a = (d_lat / 2.0).sin() * (d_lat / 2.0).sin()
+        + (d_lon / 2.0).sin()
+            * (d_lon / 2.0).sin()
+            * lat1.to_radians().cos()
+            * lat2.to_radians().cos();
+    let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
+    (6_371_000.0 * c) as i32
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Hash, Eq)]
 pub struct Node {
     pub id: i64,
@@ -45,39 +71,34 @@ pub struct Node {
     pub adjacent_nodes: Vec<AdjacentNode>,
 }
 
-fn get_positions<T: PartialEq>(iter: impl Iterator<Item = T>, elem: T) -> Vec<usize> {
-    iter.enumerate()
-        .filter(|(_, e)| *e == elem)
-        .map(|(i, _)| i)
-        .collect()
+lazy_static! {
+    static ref NODE_CACHE: Arc<RwLock<HashMap<i64, Node>>> = Arc::new(RwLock::new(HashMap::new()));
 }
 
 impl Node {
     pub async fn get(
         pg_client: Arc<Mutex<PoolConnection<Postgres>>>,
-        state: Data<AppState>,
         id: i64,
     ) -> Result<Self, Box<dyn Error>> {
-        println!("get node {}", id);
-
-        if let Some(node) = state.node_cache.read().unwrap().get(&id) {
+        // We check if the node is in the cache
+        if let Some(node) = NODE_CACHE.read().await.get(&id) {
             return Ok(node.clone());
         }
-        let mut pg_client = pg_client.lock().await;
+
+        // We get the node from the database
         let rows = sqlx::query(
             r#"
-            select * 
+            select n.lat, n.lon, w.tags as tags , w.nodes
             from planet_osm_nodes n
-            join planet_osm_ways  w 
-                on w.nodes @> array[n.id] and tags is not null
-            where 
+            left join planet_osm_ways  w 
+                on w.nodes @> array[n.id]
+            where
             n.id = $1
         "#,
         )
         .bind(id)
-        .fetch_all(pg_client.as_mut())
+        .fetch_all(pg_client.lock().await.deref_mut())
         .await?;
-        println!("got rows for {}", id);
         let mut adjacent_nodes = vec![];
         let mut lat: i32 = 0;
         let mut lon: i32 = 0;
@@ -86,7 +107,8 @@ impl Node {
             lon = row.get("lon");
             // We get all the tags
             let mut tags: HashMap<String, String> = HashMap::new();
-            let tag_strings: Vec<String> = row.get("tags");
+            let tag_strings: Vec<String> = row.try_get("tags").unwrap_or(vec![]);
+            println!("tags: {:?}", tag_strings);
             let mut ts_iter = tag_strings.iter();
             while let Some(tag) = ts_iter.next() {
                 match ts_iter.next() {
@@ -94,67 +116,102 @@ impl Node {
                     None => tags.insert(tag.clone(), "".to_string()),
                 };
             }
-
             // We get all the adjacent nodes
             let nodes: Vec<i64> = row.get("nodes");
             let node_indexes = get_positions(nodes.iter(), &id);
-
             for node_index in node_indexes {
                 if let Some(next_node) = nodes.get(node_index + 1) {
+                    let next_node_row = sqlx::query(
+                        r#"
+                        select * 
+                        from planet_osm_nodes n
+                        where 
+                        n.id = $1
+                        "#,
+                    )
+                    .bind(next_node)
+                    .fetch_one(pg_client.lock().await.deref_mut())
+                    .await?;
+                    let distance =
+                        distance(lat, lon, next_node_row.get("lat"), next_node_row.get("lon"));
                     adjacent_nodes.push(AdjacentNode {
                         node_id: *next_node,
                         tags: tags.clone(),
+                        distance,
+                        intermediate_nodes: None
                     });
                 }
-
                 // The previous one if we are not in a oneway
                 if node_index > 0 {
                     let prev_node = nodes.get(node_index - 1).unwrap();
                     if !(tags.get("oneway").unwrap_or(&"".to_string()) == "yes") {
                         if !(tags.get("oneway:bycicle").unwrap_or(&"".to_string()) == "no") {
+                            let previous_node_row = sqlx::query(
+                                r#"
+                                select * 
+                                from planet_osm_nodes n
+                                where 
+                                n.id = $1
+                                "#,
+                            )
+                            .bind(prev_node)
+                            .fetch_one(pg_client.lock().await.deref_mut())
+                            .await?;
+                            let distance = distance(
+                                lat,
+                                lon,
+                                previous_node_row.get("lat"),
+                                previous_node_row.get("lon"),
+                            );
                             adjacent_nodes.push(AdjacentNode {
                                 node_id: *prev_node,
                                 tags: tags.clone(),
+                                distance,
+                                intermediate_nodes: None
                             });
                         }
                     }
                 }
             }
         }
-
+        // let ways = Way::get(pg_client.clone(), id).await?;
+        // for way in ways {
+        //     let last_node_row = sqlx::query(
+        //         r#"
+        //         select * 
+        //         from planet_osm_nodes n
+        //         where 
+        //         n.id = $1
+        //         "#,
+        //     )
+        //     .bind(way.nodes.last().unwrap())
+        //     .fetch_one(pg_client.lock().await.deref_mut())
+        //     .await?;
+        //     let distance = distance(lat, lon, last_node_row.get("lat"), last_node_row.get("lon"));
+        //     let intermediate_nodes = Some(way.nodes);
+        //     adjacent_nodes.push(AdjacentNode {
+        //         node_id: last_node_row.get("id"),
+        //         tags: way.tags,
+        //         distance,
+        //         intermediate_nodes
+        //     });
+        // }
         let node = Node {
             id,
             lat,
             lon,
             adjacent_nodes,
         };
-
-        state.node_cache.write().unwrap().insert(id, node.clone());
+        NODE_CACHE.write().await.insert(id, node.clone());
         Ok(node)
     }
 
     pub fn distance(&self, other_node: &Node) -> i32 {
-        // We use the haversine formula
-        // https://en.wikipedia.org/wiki/Haversine_formula
-        // https://www.movable-type.co.uk/scripts/latlong.html
-        let lat1 = self.lat as f64 / 10_000_000.0;
-        let lon1 = self.lon as f64 / 10_000_000.0;
-        let lat2 = other_node.lat as f64 / 10_000_000.0;
-        let lon2 = other_node.lon as f64 / 10_000_000.0;
-        let d_lat = (lat2 - lat1).to_radians();
-        let d_lon = (lon2 - lon1).to_radians();
-        let a = (d_lat / 2.0).sin() * (d_lat / 2.0).sin()
-            + (d_lon / 2.0).sin()
-                * (d_lon / 2.0).sin()
-                * lat1.to_radians().cos()
-                * lat2.to_radians().cos();
-        let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
-        (6_371_000.0 * c) as i32
+        self::distance(self.lat, self.lon, other_node.lat, other_node.lon)
     }
 
     pub async fn closest(
         pg_client: Arc<Mutex<PoolConnection<Postgres>>>,
-        state: Data<AppState>,
         lat: f64,
         lon: f64,
     ) -> Result<Self, Box<dyn Error>> {
@@ -184,11 +241,9 @@ impl Node {
         .await?
         .get("nodes");
 
-        println!("got node ids for {}, {}", lat, lon);
-
         let mut nodes = vec![];
         for id in node_ids {
-            let node = Node::get(pg_client.to_owned(), state.clone(), id).await?;
+            let node = Node::get(pg_client.to_owned(), id).await?;
             nodes.push(node);
         }
 
@@ -206,11 +261,11 @@ impl Node {
     pub async fn successors(
         &self,
         pg_client: Arc<Mutex<PoolConnection<Postgres>>>,
-        state: Data<AppState>,
         model: Model,
     ) -> Result<Vec<(Node, i64)>, Box<dyn Error>> {
         let mut nodes: Vec<(Node, i64)> = Vec::new();
-        for a_node in self.adjacent_nodes.to_owned() {
+        println!("adjacent nodes: {:?}", self.adjacent_nodes);
+        for a_node in &self.adjacent_nodes {
             if a_node.has_tag_value("highway", "motorway")
                 || a_node.has_tag_value("highway", "motorway_link")
                 || a_node.has_tag_value("bicycle", "no")
@@ -218,7 +273,6 @@ impl Node {
                 || a_node.has_tag_value("highway", "construction")
                 || a_node.has_tag_value("access", "private")
                 || a_node.has_tag_value("source", "approximative")
-                || a_node.has_tag_value("footway", "sidewalk")
                 || (!a_node.has_tag("highway") && !a_node.has_tag("bicycle"))
             {
                 continue;
@@ -230,15 +284,14 @@ impl Node {
             }
             let (new_node, move_cost) = match model {
                 Model::Fast => {
-                    self.calculate_cost_fast(pg_client.to_owned(), state.clone(), a_node)
+                    self.calculate_cost_fast(pg_client.to_owned(), a_node)
                         .await?
                 }
                 Model::Safe => {
-                    self.calculate_cost_safe(pg_client.to_owned(), state.clone(), a_node)
+                    self.calculate_cost_safe(pg_client.to_owned(), a_node)
                         .await?
                 }
             };
-
             nodes.push((new_node, move_cost as i64));
         }
         Ok(nodes)
@@ -247,13 +300,14 @@ impl Node {
     pub async fn calculate_cost_safe(
         &self,
         pg_client: Arc<Mutex<PoolConnection<Postgres>>>,
-        state: Data<AppState>,
-        a_node: AdjacentNode,
+        a_node: &AdjacentNode,
     ) -> Result<(Node, i64), Box<dyn Error>> {
-        println!("calculate_cost_safe for {} and {}", self.id, a_node.node_id);
-        let other_node = Node::get(pg_client.to_owned(), state.to_owned(), a_node.node_id).await?;
-        println!("got other node {}", other_node.id);
-        let mut move_cost = self.distance(&other_node) as f32;
+        let other_node = Node::get(pg_client.to_owned(), a_node.node_id).await?;
+        let mut move_cost = a_node.distance as f64;
+
+        if a_node.has_tag_value("route", "bicycle"){
+            move_cost *= 0.8;
+        }
 
         // We prefer cycleways
         if a_node.has_tag_value("highway", "cycleway")
@@ -277,16 +331,17 @@ impl Node {
             || a_node.has_tag_value("cycleway:left", "track")
             || a_node.has_tag_value("cycleway:right", "track")
             || a_node.has_tag_value("cycleway:both", "track")
+            || a_node.has_tag_value("route", "bicycle")
         {
             move_cost *= 0.8
         } else if a_node.has_tag_value("highway", "footway") {
             if !a_node.has_tag_value("bicycle", "no") {
-                move_cost *= 1.2;
+                move_cost *= 1.1;
             } else {
                 move_cost *= 10.0;
             }
         } else if a_node.has_tag_value("surface", "gravel") {
-            move_cost *= 1.5;
+            move_cost *= 1.2;
         } else if a_node.has_tag_value("surface", "dirt") {
             move_cost *= 5.0;
         } else if a_node.has_tag_value("bicycle", "dismount") {
@@ -324,11 +379,14 @@ impl Node {
     pub async fn calculate_cost_fast(
         &self,
         pg_client: Arc<Mutex<PoolConnection<Postgres>>>,
-        state: Data<AppState>,
-        a_node: AdjacentNode,
+        a_node: &AdjacentNode,
     ) -> Result<(Node, i64), Box<dyn Error>> {
-        let other_node = Node::get(pg_client, state.clone(), a_node.node_id).await?;
+        let other_node = Node::get(pg_client, a_node.node_id).await?;
         let mut move_cost = self.distance(&other_node) as f32;
+
+        if a_node.has_tag_value("route", "bicycle"){
+            move_cost *= 0.8;
+        }
 
         // We prefer cycleways
         if a_node.has_tag_value("highway", "cycleway")
@@ -351,11 +409,11 @@ impl Node {
             || a_node.has_tag_value("cycleway", "track")
             || a_node.has_tag_value("cycleway:left", "track")
             || a_node.has_tag_value("cycleway:right", "track")
-            || a_node.has_tag_value("cycleway:both", "track")
+            || a_node.has_tag_value("cycleway:both", "track")                        
         {
             move_cost *= 0.9;
         } else if a_node.has_tag_value("highway", "footway") {
-            move_cost *= 5.0;
+            move_cost *= 1.1;
         } else if a_node.has_tag_value("surface", "gravel") {
             move_cost *= 1.1;
         } else if a_node.has_tag_value("surface", "dirt") {
@@ -393,37 +451,17 @@ impl Node {
         self.lon as f64 / 10_000_000.0
     }
 
-    pub async fn route(
-        coords: &RouteRequest,
-        state: Data<AppState>,
-    ) -> Result<(Vec<Node>, i64), Box<dyn Error>> {
+    pub async fn route(coords: &RouteRequest) -> Result<(Vec<Node>, i64), Box<dyn Error>> {
         let now = std::time::Instant::now();
         let coords = coords.to_owned();
         let client = Arc::new(Mutex::new(get_pg_client().await?));
-        let end = Node::closest(
-            client.to_owned(),
-            state.to_owned(),
-            coords.end.lat,
-            coords.end.lng,
-        )
-        .await?;
-        let start = Node::closest(
-            client.to_owned(),
-            state.to_owned(),
-            coords.start.lat,
-            coords.start.lng,
-        )
-        .await?;
+        let end = Node::closest(client.to_owned(), coords.end.lat, coords.end.lng).await?;
+        let start = Node::closest(client.to_owned(), coords.start.lat, coords.start.lng).await?;
         let (path, cost) = astar(
             &start,
             |node: &Node| {
                 let client = client.to_owned();
-                let state = state.to_owned();
-                Box::pin(async move {
-                    node.successors(client, state.to_owned(), Model::Safe)
-                        .await
-                        .unwrap()
-                })
+                Box::pin(async move { node.successors(client, Model::Safe).await.unwrap() })
             },
             |node| node.distance(&end).into(),
             |node| {
@@ -434,7 +472,7 @@ impl Node {
             },
         )
         .await
-        .unwrap();
+        .expect("Problem with astar result");
         Ok((path, cost))
     }
 }

@@ -3,10 +3,10 @@ use std::{
     thread,
 };
 
-use crate::{data::node::Node, AppState};
+use crate::{data::node::Node};
 use actix_web::{
     post,
-    web::{self, Data},
+    web::{self},
     HttpResponse, Responder,
 };
 use serde::{Deserialize, Serialize};
@@ -32,11 +32,10 @@ pub struct RouteRequest {
 
 #[post("/route")]
 async fn route(
-    state: Data<AppState>,
     coords: web::Json<RouteRequest>,
 ) -> Result<impl Responder, Box<dyn Error>> {
     let coords = coords.into_inner();
-    let (path, _cost) = Node::route(&coords, state.clone()).await?;
+    let (path, _cost) = Node::route(&coords).await?;
     let mut response: Vec<LatLon> = thread::spawn(move || {
         let mut response = vec![];
         path.iter().for_each(|node| {
